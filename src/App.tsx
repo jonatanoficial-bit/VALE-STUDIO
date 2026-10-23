@@ -1,9 +1,10 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities } from './audio/AudioEngine'
 import { buildPeaks } from './audio/peaks'
+import { encodeWav } from './audio/wav'
 import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track } from './domain/model'
 import { createProject, createTrack, gainToDb } from './domain/model'
-import { projectRepository } from './storage/projectRepository'
+import { projectRepository, type TakeDraft } from './storage/projectRepository'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'project'
 type Toast = { tone: 'info' | 'error' | 'success'; text: string } | undefined
@@ -72,6 +73,7 @@ function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm
 
 export default function App() {
   const engineRef = useRef(new AudioEngine())
+  const activeDraftRef = useRef<{ id: string; projectId: string; trackId: string } | undefined>(undefined)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [projects, setProjects] = useState<AudioProject[]>([])
   const [project, setProject] = useState<AudioProject>()
@@ -89,12 +91,14 @@ export default function App() {
   const [toast, setToast] = useState<Toast>()
   const [showNewProject, setShowNewProject] = useState(false)
   const [exporting, setExporting] = useState<'wav' | 'mp3'>()
+  const [takeDrafts, setTakeDrafts] = useState<TakeDraft[]>([])
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
 
   const selectedTrack = project?.tracks.find((track) => track.id === selectedTrackId) ?? project?.tracks[0]
   const selectedClip = project?.clips.find((clip) => clip.id === selectedClipId)
   const activeAssetById = useMemo(() => new Map(project?.assets.map((asset) => [asset.id, asset]) ?? []), [project])
+  const activeProjectId = project?.id
 
   useEffect(() => {
     void projectRepository.listProjects().then(setProjects).catch(() => setToast({ tone: 'error', text: 'Não foi possível abrir os projetos locais.' }))
@@ -110,6 +114,11 @@ export default function App() {
   }, [project])
 
   useEffect(() => {
+    if (!activeProjectId) return
+    void projectRepository.listTakeDrafts(activeProjectId).then(setTakeDrafts).catch(() => setToast({ tone: 'error', text: 'Não foi possível verificar os rascunhos de gravação.' }))
+  }, [activeProjectId])
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (!project) return
       setPlayhead(engineRef.current.getCurrentFrame(project.audioSampleRate))
@@ -123,21 +132,6 @@ export default function App() {
     }, 80)
     return () => window.clearInterval(timer)
   }, [project])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const element = event.target as HTMLElement
-      if (element.tagName === 'INPUT' || element.tagName === 'SELECT' || element.tagName === 'TEXTAREA') return
-      if (!project) return
-      if (event.code === 'Space') { event.preventDefault(); togglePlayback() }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo() }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo() }
-      if (event.key.toLowerCase() === 'm' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, mute: !track.mute }))
-      if (event.key.toLowerCase() === 's' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, solo: !track.solo }))
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  })
 
   function updateProject(change: (current: AudioProject) => AudioProject, recordHistory = true) {
     setProject((current) => {
@@ -294,7 +288,17 @@ export default function App() {
     if (isRecording) {
       const captured = await engineRef.current.stopRecording()
       setIsRecording(false)
-      if (!captured || captured.frames < 128) { setToast({ tone: 'error', text: 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' }); return }
+      const activeDraft = activeDraftRef.current
+      activeDraftRef.current = undefined
+      if (!captured || captured.frames < 128) {
+        if (activeDraft) await projectRepository.discardTakeDraft(activeDraft.id).catch(() => undefined)
+        setToast({ tone: 'error', text: 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' })
+        return
+      }
+      if (!activeDraft) {
+        setToast({ tone: 'error', text: 'A sessão de segurança do take foi perdida. O áudio não foi marcado como salvo.' })
+        return
+      }
       const assetId = makeId()
       const takeId = makeId()
       const asset: MediaAsset = {
@@ -305,29 +309,98 @@ export default function App() {
       }
       const startFrame = Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
       const clip: Clip = { id: makeId(), assetId, trackId: selectedTrack.id, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
-      await projectRepository.saveAsset(asset, captured.blob)
-      engineRef.current.cacheAsset(assetId, captured.buffer)
-      updateProject((current) => ({
-        ...current,
-        assets: [...current.assets, asset], clips: [...current.clips, clip],
-        tracks: current.tracks.map((track) => track.id !== selectedTrack.id ? track : { ...track, clipIds: [...track.clipIds, clip.id], takeIds: [...track.takeIds, takeId] }),
-        takes: [...current.takes.map((take) => take.trackId === selectedTrack.id ? { ...take, selected: false } : take), { id: takeId, assetId, trackId: selectedTrack.id, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames, createdAt: asset.createdAt, calibrationFrames: current.calibrationFrames, selected: true }],
-      }))
-      setSelectedClipId(clip.id)
-      setToast({ tone: 'success', text: `Take salvo localmente após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.` })
+      const nextProject: AudioProject = {
+        ...project,
+        assets: [...project.assets, asset], clips: [...project.clips, clip],
+        tracks: project.tracks.map((track) => track.id !== selectedTrack.id ? track : { ...track, clipIds: [...track.clipIds, clip.id], takeIds: [...track.takeIds, takeId] }),
+        takes: [...project.takes.map((take) => take.trackId === selectedTrack.id ? { ...take, selected: false } : take), { id: takeId, assetId, trackId: selectedTrack.id, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames, createdAt: asset.createdAt, calibrationFrames: project.calibrationFrames, selected: true }],
+        updatedAt: new Date().toISOString(),
+      }
+      try {
+        await projectRepository.commitTake(nextProject, asset, captured.blob, activeDraft.id)
+        engineRef.current.cacheAsset(assetId, captured.buffer)
+        setProject(nextProject)
+        setSelectedClipId(clip.id)
+        setTakeDrafts((drafts) => drafts.filter((draft) => draft.id !== activeDraft.id))
+        void projectRepository.listProjects().then(setProjects)
+        const durabilityNotice = captured.durability.error ? ' O take foi confirmado no commit final, mas houve falha em um checkpoint intermediário.' : ''
+        setToast({ tone: 'success', text: `Take salvo localmente após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.${durabilityNotice}` })
+      } catch (error) {
+        setToast({ tone: 'error', text: `O commit final falhou; o rascunho persistido continua disponível para recuperação.${error instanceof Error ? ` ${error.message}` : ''}` })
+      }
       return
     }
     if (!selectedTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista que receberá a gravação antes de tocar em REC.' }); return }
     const audio = capabilities ?? await activateAudio()
     if (!audio) return
+    const draftId = makeId()
     try {
       if (!isPlaying) { engineRef.current.play(project); setIsPlaying(true) }
-      const settings = await engineRef.current.startRecording(selectedTrack.id, project, selectedTrack.monitorMode)
+      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: selectedTrack.id, timelineStartFrame: engineRef.current.getCurrentFrame(project.audioSampleRate), sampleRate: audio.sampleRate, channels: 1 })
+      activeDraftRef.current = { id: draftId, projectId: project.id, trackId: selectedTrack.id }
+      const recording = await engineRef.current.startRecording(selectedTrack.id, project, selectedTrack.monitorMode, async (chunk) => {
+        await projectRepository.appendTakeDraftChunk({ ...chunk, draftId })
+      })
+      await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
       setIsRecording(true)
-      const agc = settings?.autoGainControl
-      setToast({ tone: 'info', text: agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco na pista armada.' })
+      const agc = recording.inputSettings?.autoGainControl
+      setToast({ tone: 'info', text: agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
     } catch (error) {
+      if (engineRef.current.isRecording) await engineRef.current.stopRecording().catch(() => undefined)
+      activeDraftRef.current = undefined
+      await projectRepository.discardTakeDraft(draftId).catch(() => undefined)
       setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível iniciar a gravação.' })
+    }
+  }
+
+  async function recoverTakeDraft(draft: TakeDraft) {
+    if (!project) return
+    const track = project.tracks.find((item) => item.id === draft.trackId)
+    if (!track) { setToast({ tone: 'error', text: 'A pista original deste rascunho não existe mais. Crie ou restaure a pista antes de recuperar o take.' }); return }
+    const audio = capabilities ?? await activateAudio()
+    if (!audio) return
+    try {
+      const recovered = await projectRepository.recoverTakeDraft(draft.id)
+      if (!recovered || recovered.pcm.length < 128) { setToast({ tone: 'error', text: 'Este rascunho não contém frames suficientes para recuperar um take.' }); return }
+      const buffer = engineRef.current.createBufferFromPcm(recovered.pcm, recovered.sampleRate, recovered.channels)
+      const assetId = makeId()
+      const takeId = makeId()
+      const takeBlob = encodeWav(buffer, 32)
+      const asset: MediaAsset = {
+        id: assetId, name: `Take recuperado ${project.takes.filter((take) => take.trackId === track.id).length + 1}.wav`, mimeType: 'audio/wav', sampleRate: buffer.sampleRate, channels: buffer.numberOfChannels,
+        frames: recovered.pcm.length / recovered.channels, durationFrames: Math.round(buffer.duration * project.audioSampleRate), byteLength: takeBlob.size,
+        peaks: buildPeaks(buffer), createdAt: new Date().toISOString(),
+      }
+      const startFrame = Math.max(0, recovered.timelineStartFrame + project.calibrationFrames)
+      const clip: Clip = { id: makeId(), assetId, trackId: track.id, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
+      const nextProject: AudioProject = {
+        ...project,
+        assets: [...project.assets, asset], clips: [...project.clips, clip],
+        tracks: project.tracks.map((item) => item.id === track.id ? { ...item, clipIds: [...item.clipIds, clip.id], takeIds: [...item.takeIds, takeId] } : item),
+        takes: [...project.takes.map((take) => take.trackId === track.id ? { ...take, selected: false } : take), { id: takeId, assetId, trackId: track.id, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames, createdAt: asset.createdAt, calibrationFrames: project.calibrationFrames, selected: true }],
+        updatedAt: new Date().toISOString(),
+      }
+      await projectRepository.commitTake(nextProject, asset, takeBlob, draft.id)
+      engineRef.current.cacheAsset(assetId, buffer)
+      setProject(nextProject)
+      setSelectedTrackId(track.id)
+      setSelectedClipId(clip.id)
+      setTakeDrafts((drafts) => drafts.filter((item) => item.id !== draft.id))
+      void projectRepository.listProjects().then(setProjects)
+      setToast({ tone: 'success', text: `Take recuperado com ${recovered.persistedChunks} checkpoints locais confirmados.` })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível recuperar este take.' })
+    }
+  }
+
+  async function discardTakeDraft(draft: TakeDraft) {
+    if (!window.confirm('Descartar este rascunho de gravação? Os trechos PCM locais serão removidos.')) return
+    try {
+      await projectRepository.discardTakeDraft(draft.id)
+      setTakeDrafts((drafts) => drafts.filter((item) => item.id !== draft.id))
+      setToast({ tone: 'info', text: 'Rascunho de gravação descartado localmente.' })
+    } catch {
+      setToast({ tone: 'error', text: 'Não foi possível descartar este rascunho.' })
     }
   }
 
@@ -384,6 +457,21 @@ export default function App() {
     updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, timelineStartFrame: Math.max(0, clip.timelineStartFrame + delta) } : clip) }))
   }
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const element = event.target as HTMLElement
+      if (element.tagName === 'INPUT' || element.tagName === 'SELECT' || element.tagName === 'TEXTAREA') return
+      if (!project) return
+      if (event.code === 'Space') { event.preventDefault(); togglePlayback() }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo() }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo() }
+      if (event.key.toLowerCase() === 'm' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, mute: !track.mute }))
+      if (event.key.toLowerCase() === 's' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, solo: !track.solo }))
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
   if (!project) return <main className="app-shell home-shell">
     <header className="home-header"><Logo /><button className="icon-button" type="button" aria-label="Ajuda">?</button></header>
     <section className="hero"><div className="eyebrow">ESTÚDIO MULTIPISTA LOCAL</div><h1>Grave. Crie.<br /><span>Misture.</span></h1><p>Seu estúdio multipista em qualquer lugar, sem conta e sem enviar seu áudio para a nuvem.</p><div className="hero-line" /></section>
@@ -395,7 +483,7 @@ export default function App() {
   </main>
 
   return <main className="app-shell studio-shell">
-    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : ''}>{isRecording ? 'CAPTURANDO' : 'SALVO LOCAL'}</span></div><div className="header-actions"><button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" onClick={() => { setProject(undefined); setView('tracks') }} aria-label="Voltar aos projetos">⌂</button></div></header>
+    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions"><button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" onClick={() => { setProject(undefined); setView('tracks') }} aria-label="Voltar aos projetos">⌂</button></div></header>
     <section className="transport"><button type="button" className="transport-button" onClick={() => { engineRef.current.stop(); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div><button type="button" className={`metro-button ${isMetronome ? 'active' : ''}`} onClick={toggleMetronome} aria-pressed={isMetronome}>♩<span>METRO</span></button></section>
 
     <section className="session-meta"><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.max(40, current.bpm - 1) }))}>−</button><strong>{project.bpm} BPM</strong><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.min(240, current.bpm + 1) }))}>＋</button><span className="meta-divider" /><span>{project.timeSignature}</span><span className={`sync-badge ${project.calibrationFrames ? 'calibrated' : ''}`}>{project.calibrationFrames ? `Ajuste ${project.calibrationFrames} fr` : 'Sem calibração'}</span></section>
@@ -409,7 +497,7 @@ export default function App() {
 
     {view === 'effects' && selectedTrack && <section className="effects-view"><div className="view-intro"><div><span className="eyebrow">EFEITOS REAIS</span><h2>{selectedTrack.name}</h2><p>Os controles abaixo alteram o grafo de áudio quando a faixa é reproduzida ou exportada.</p></div><select value={selectedTrack.id} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div><div className="effects-grid"><EffectCard title="Filtro de graves" active={selectedTrack.effects.highPassEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassEnabled: !track.effects.highPassEnabled } }))}><RangeControl label="Frequência" value={selectedTrack.effects.highPassHz} min={20} max={500} suffix=" Hz" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassHz: value } }))} /></EffectCard><EffectCard title="Compressor" active={selectedTrack.effects.compressorEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, compressorEnabled: !track.effects.compressorEnabled } }))}><RangeControl label="Threshold" value={selectedTrack.effects.threshold} min={-60} max={0} suffix=" dB" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, threshold: value } }))} /><RangeControl label="Ratio" value={selectedTrack.effects.ratio} min={1} max={12} step={0.5} suffix=":1" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, ratio: value } }))} /></EffectCard><EffectCard title="Reverb" active={selectedTrack.effects.reverbEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbEnabled: !track.effects.reverbEnabled } }))}><RangeControl label="Mix" value={selectedTrack.effects.reverbMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbMix: value / 100 } }))} /></EffectCard><EffectCard title="Delay" active={selectedTrack.effects.delayEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayEnabled: !track.effects.delayEnabled } }))}><RangeControl label="Tempo" value={selectedTrack.effects.delayTime * 1000} min={40} max={1200} suffix=" ms" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayTime: value / 1000 } }))} /><RangeControl label="Mix" value={selectedTrack.effects.delayMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayMix: value / 100 } }))} /></EffectCard></div></section>}
 
-    {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize uma mixagem local.</h3><p>WAV é PCM estéreo. MP3 usa encoder MPEG Layer III incluído no bundle.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
+    {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize uma mixagem local.</h3><p>WAV é PCM estéreo. MP3 usa encoder MPEG Layer III incluído no bundle.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
     <nav className="bottom-nav" aria-label="Navegação do estúdio">{([{ id: 'tracks', label: 'Pistas', icon: '≋' }, { id: 'mixer', label: 'Mixer', icon: '▥' }, { id: 'effects', label: 'Efeitos', icon: '◌' }, { id: 'project', label: 'Projeto', icon: '◇' }] as const).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</nav>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />

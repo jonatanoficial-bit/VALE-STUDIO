@@ -24,7 +24,7 @@ function interleave(buffer: AudioBuffer): Float32Array {
   return output
 }
 
-export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
+export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): Blob {
   const channels = buffer.numberOfChannels
   const bytesPerSample = bitDepth / 8
   const pcm = interleave(buffer)
@@ -38,7 +38,7 @@ export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
   writeText(8, 'WAVE')
   writeText(12, 'fmt ')
   view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
+  view.setUint16(20, bitDepth === 32 ? 3 : 1, true)
   view.setUint16(22, channels, true)
   view.setUint32(24, buffer.sampleRate, true)
   view.setUint32(28, buffer.sampleRate * channels * bytesPerSample, true)
@@ -52,11 +52,13 @@ export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
     const clamped = Math.max(-1, Math.min(1, sample))
     if (bitDepth === 16) {
       view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true)
-    } else {
+    } else if (bitDepth === 24) {
       const value = Math.round(clamped * 0x7fffff)
       view.setUint8(offset, value & 0xff)
       view.setUint8(offset + 1, (value >> 8) & 0xff)
       view.setUint8(offset + 2, (value >> 16) & 0xff)
+    } else {
+      view.setFloat32(offset, sample, true)
     }
     offset += bytesPerSample
   })

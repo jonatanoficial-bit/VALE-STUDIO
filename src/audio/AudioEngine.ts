@@ -29,6 +29,25 @@ export type CapturedRecording = {
   channels: number
   sampleRate: number
   inputSettings?: MediaTrackSettings
+  durability: {
+    persistedChunks: number
+    persistedFrames: number
+    error?: string
+  }
+}
+
+export type RecordingPcmChunk = {
+  sequence: number
+  firstFrame: number
+  frameCount: number
+  channels: number
+  pcm: ArrayBuffer
+  writtenAt: string
+}
+
+export type RecordingStart = {
+  inputSettings?: MediaTrackSettings
+  startFrame: number
 }
 
 function createImpulse(context: BaseAudioContext, seconds = 1.2): AudioBuffer {
@@ -75,6 +94,15 @@ export class AudioEngine {
   private recordingStartFrame = 0
   private recordingSettings?: MediaTrackSettings
   private resolveFlush?: () => void
+  private pendingDurableChunks: Float32Array[] = []
+  private pendingDurableFrames = 0
+  private persistedChunks = 0
+  private persistedFrames = 0
+  private durableQueuedFrames = 0
+  private durableSequence = 0
+  private durableWrite: Promise<void> = Promise.resolve()
+  private durableFailure?: string
+  private persistRecordingChunk?: (chunk: RecordingPcmChunk) => Promise<void>
 
   async initFromUserGesture(): Promise<AudioCapabilities> {
     if (!this.context) {
@@ -120,6 +148,17 @@ export class AudioEngine {
 
   cacheAsset(id: string, buffer: AudioBuffer): void {
     this.assetBuffers.set(id, buffer)
+  }
+
+  createBufferFromPcm(pcm: Float32Array, sampleRate: number, channels = 1): AudioBuffer {
+    if (!this.context) throw new Error('Ative o áudio antes de recuperar o take.')
+    const frames = Math.max(1, Math.floor(pcm.length / channels))
+    const buffer = this.context.createBuffer(channels, frames, sampleRate)
+    for (let channel = 0; channel < channels; channel += 1) {
+      const output = buffer.getChannelData(channel)
+      for (let frame = 0; frame < frames; frame += 1) output[frame] = pcm[frame * channels + channel] ?? 0
+    }
+    return buffer
   }
 
   getCurrentFrame(projectRate: number): number {
@@ -288,7 +327,37 @@ export class AudioEngine {
     return navigator.mediaDevices.getUserMedia({ audio: constraints })
   }
 
-  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode): Promise<MediaTrackSettings | undefined> {
+  private queueDurableChunk(): void {
+    if (!this.persistRecordingChunk || this.pendingDurableFrames === 0) return
+    const chunks = this.pendingDurableChunks
+    const frames = this.pendingDurableFrames
+    this.pendingDurableChunks = []
+    this.pendingDurableFrames = 0
+    const pcm = new Float32Array(frames)
+    let offset = 0
+    chunks.forEach((chunk) => { pcm.set(chunk, offset); offset += chunk.length })
+    const chunk: RecordingPcmChunk = {
+      sequence: this.durableSequence,
+      firstFrame: this.durableQueuedFrames,
+      frameCount: frames,
+      channels: 1,
+      pcm: pcm.buffer,
+      writtenAt: new Date().toISOString(),
+    }
+    this.durableSequence += 1
+    this.durableQueuedFrames += frames
+    this.durableWrite = this.durableWrite.then(async () => {
+      try {
+        await this.persistRecordingChunk?.(chunk)
+        this.persistedChunks += 1
+        this.persistedFrames += frames
+      } catch (error) {
+        this.durableFailure ??= error instanceof Error ? error.message : 'Não foi possível gravar um trecho PCM no armazenamento local.'
+      }
+    })
+  }
+
+  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): Promise<RecordingStart> {
     if (!this.context || !this.context.audioWorklet) throw new Error('AudioWorklet não está disponível. A gravação multipista não pode ser iniciada com segurança neste navegador.')
     if (this.recordingTrackId) throw new Error('Já existe uma gravação em andamento.')
 
@@ -310,13 +379,30 @@ export class AudioEngine {
     this.inputSource.connect(this.monitorGain).connect(this.context.destination)
 
     this.recordingChunks = []
+    this.pendingDurableChunks = []
+    this.pendingDurableFrames = 0
+    this.persistedChunks = 0
+    this.persistedFrames = 0
+    this.durableQueuedFrames = 0
+    this.durableSequence = 0
+    this.durableWrite = Promise.resolve()
+    this.durableFailure = undefined
+    this.persistRecordingChunk = onPcmChunk
     this.recordingTrackId = trackId
     this.recordingStartFrame = this.getCurrentFrame(project.audioSampleRate)
     this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[] }>) => {
-      if (data.type === 'pcm' && data.channels?.[0]) this.recordingChunks.push(new Float32Array(data.channels[0]))
+      if (data.type === 'pcm' && data.channels?.[0]) {
+        const pcm = new Float32Array(data.channels[0])
+        this.recordingChunks.push(pcm)
+        if (this.persistRecordingChunk) {
+          this.pendingDurableChunks.push(pcm)
+          this.pendingDurableFrames += pcm.length
+          if (this.pendingDurableFrames >= 8192) this.queueDurableChunk()
+        }
+      }
       if (data.type === 'flushed') this.resolveFlush?.()
     }
-    return this.recordingSettings
+    return { inputSettings: this.recordingSettings, startFrame: this.recordingStartFrame }
   }
 
   setMonitorMode(mode: MonitorMode): void {
@@ -357,6 +443,8 @@ export class AudioEngine {
       this.resolveFlush = resolve
       this.recorder!.port.postMessage({ type: 'stop' })
     })
+    this.queueDurableChunk()
+    await this.durableWrite
     const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length, 0)
     const buffer = this.context.createBuffer(1, Math.max(1, frames), this.context.sampleRate)
     const output = buffer.getChannelData(0)
@@ -366,13 +454,14 @@ export class AudioEngine {
       offset += chunk.length
     })
     const recording: CapturedRecording = {
-      blob: encodeWav(buffer),
+      blob: encodeWav(buffer, 32),
       buffer,
       peaks: buildPeaks(buffer),
       frames,
       channels: 1,
       sampleRate: this.context.sampleRate,
       inputSettings: this.recordingSettings,
+      durability: { persistedChunks: this.persistedChunks, persistedFrames: this.persistedFrames, error: this.durableFailure },
     }
     safeDisconnect(this.inputSource)
     safeDisconnect(this.inputAnalyser)
@@ -387,6 +476,9 @@ export class AudioEngine {
     this.recordingTrackId = undefined
     this.recordingChunks = []
     this.resolveFlush = undefined
+    this.pendingDurableChunks = []
+    this.pendingDurableFrames = 0
+    this.persistRecordingChunk = undefined
     return recording
   }
 

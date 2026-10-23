@@ -4,9 +4,9 @@ DAW web local-first, mobile-first e desktop, construída a partir da Bíblia Mes
 
 ## Estado desta entrega
 
-Esta é a **fundação funcional de implementação**, não uma declaração de `v1.0 RC`. Ela já contém um app responsivo com criação/persistência local de projeto, importação e decode local de áudio, waveform calculada do buffer decodificado, transporte, AudioWorklet de captura PCM, take WAV local, monitoramento selecionável, mixer/efeitos via Web Audio, edição não destrutiva básica, render WAV/MP3 local, PWA shell e CI para Pages.
+Esta é a **fundação funcional de implementação**, não uma declaração de `v1.0 RC`. Ela já contém um app responsivo com criação/persistência local de projeto, importação e decode local de áudio, waveform calculada do buffer decodificado, transporte, AudioWorklet de captura PCM, journal local de chunks, recuperação explícita de take interrompido, commit atômico de take/asset/projeto, monitoramento selecionável, mixer/efeitos via Web Audio, edição não destrutiva básica, render WAV/MP3 local, PWA shell e CI para Pages.
 
-O pacote ainda precisa de endurecimento antes de se declarar uma entrega P0 completa: captura por chunks duráveis e recuperação de crash, calibração por loopback e drift, backup `.valestudio` interoperável, stems, automação, medição de hardware e a cobertura A01–A70. O estado de cada grupo está em [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
+O pacote ainda precisa de endurecimento antes de se declarar uma entrega P0 completa: validação de crash/kill em hardware, calibração por loopback e drift, backup `.valestudio` interoperável, stems, automação, medição de hardware e a cobertura A01–A70. O estado de cada grupo está em [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 ## Rodar localmente
 
@@ -38,3 +38,4 @@ Não há login, analytics, upload compulsório ou dependência de backend. Áudi
 
 - [Análise integral da Bíblia Mestre](docs/ANALISE_BIBLIA_MESTRE.md)
 - [Matriz de aceitação](docs/ACCEPTANCE.md)
+- [Plano de cinco etapas](docs/PHASES.md)
