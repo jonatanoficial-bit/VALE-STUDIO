@@ -35,6 +35,16 @@ test('a captura mantém checkpoints PCM e só confirma o take em transação loc
   assert.match(repository, /database\.transaction\(\[PROJECT_STORE, ASSET_STORE, TAKE_DRAFT_STORE, TAKE_CHUNK_STORE\], 'readwrite'\)/)
 })
 
+test('preview e render usam a mesma linha de tempo por frames, com fades não destrutivos', async () => {
+  const engine = await read('src/audio/AudioEngine.ts')
+  const app = await read('src/App.tsx')
+  assert.match(engine, /clip\.sourceOffsetFrame \+ elapsedFrames\) \/ projectRate/)
+  assert.match(engine, /private applyClipEnvelope/)
+  assert.match(engine, /this\.applyClipEnvelope\(clipGain, clip, sourceAt, 0, clip\.durationFrames, project\.audioSampleRate\)/)
+  assert.match(app, /'fadeIn' \| 'fadeOut'/)
+  assert.match(app, /Compensação manual de posição/)
+})
+
 test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async () => {
   const engine = await read('src/audio/AudioEngine.ts')
   const main = await read('src/main.tsx')

@@ -1,4 +1,4 @@
-import type { AudioProject, MonitorMode, Track } from '../domain/model'
+import type { AudioProject, Clip, MonitorMode, Track } from '../domain/model'
 import { dbToGain } from '../domain/model'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
@@ -241,22 +241,45 @@ export class AudioEngine {
     return { highPass, compressor, reverbGain, delayGain, delay, fader, panner, analyser }
   }
 
-  private createSource(buffer: AudioBuffer, graph: TrackGraph, projectRate: number, clipStart: number, sourceOffset: number, duration: number, startFrame: number, startAt: number): void {
-    const clipEnd = clipStart + duration
+  private applyClipEnvelope(gain: GainNode, clip: Clip, sourceAt: number, elapsedFrames: number, playableFrames: number, projectRate: number): void {
+    const baseLevel = dbToGain(clip.gainDb)
+    const sourceEnd = sourceAt + playableFrames / projectRate
+    gain.gain.setValueAtTime(baseLevel, sourceAt)
+
+    if (clip.fadeInFrames > 0 && elapsedFrames < clip.fadeInFrames) {
+      const initialLevel = Math.max(0, Math.min(1, elapsedFrames / clip.fadeInFrames)) * baseLevel
+      const fadeInEnd = sourceAt + Math.min(playableFrames, clip.fadeInFrames - elapsedFrames) / projectRate
+      gain.gain.setValueAtTime(initialLevel, sourceAt)
+      gain.gain.linearRampToValueAtTime(baseLevel, fadeInEnd)
+    }
+
+    const fadeOutStartFrame = Math.max(0, clip.durationFrames - clip.fadeOutFrames)
+    const endFrame = elapsedFrames + playableFrames
+    if (clip.fadeOutFrames > 0 && endFrame > fadeOutStartFrame) {
+      const fadeOutAt = sourceAt + Math.max(0, fadeOutStartFrame - elapsedFrames) / projectRate
+      const endingLevel = Math.max(0, Math.min(1, (clip.durationFrames - endFrame) / clip.fadeOutFrames)) * baseLevel
+      gain.gain.setValueAtTime(baseLevel, fadeOutAt)
+      gain.gain.linearRampToValueAtTime(endingLevel, sourceEnd)
+    }
+  }
+
+  private createSource(buffer: AudioBuffer, graph: TrackGraph, projectRate: number, clip: Clip, startFrame: number, startAt: number): void {
+    const clipEnd = clip.timelineStartFrame + clip.durationFrames
     if (clipEnd <= startFrame) return
-    const elapsedFrames = Math.max(0, startFrame - clipStart)
-    const offsetSeconds = (sourceOffset + elapsedFrames) / buffer.sampleRate
-    const playableFrames = Math.min(duration - elapsedFrames, Math.round((buffer.duration - offsetSeconds) * projectRate))
+    const elapsedFrames = Math.max(0, startFrame - clip.timelineStartFrame)
+    const offsetSeconds = (clip.sourceOffsetFrame + elapsedFrames) / projectRate
+    const playableFrames = Math.min(clip.durationFrames - elapsedFrames, Math.round((buffer.duration - offsetSeconds) * projectRate))
     if (playableFrames <= 0) return
 
     const source = this.context!.createBufferSource()
     const clipGain = this.context!.createGain()
-    clipGain.gain.value = 1
     source.buffer = buffer
     source.connect(clipGain).connect(graph.highPass)
-    const delay = Math.max(0, clipStart - startFrame) / projectRate
+    const delay = Math.max(0, clip.timelineStartFrame - startFrame) / projectRate
     const playableSeconds = playableFrames / projectRate
-    source.start(startAt + delay, offsetSeconds, playableSeconds)
+    const sourceAt = startAt + delay
+    this.applyClipEnvelope(clipGain, clip, sourceAt, elapsedFrames, playableFrames, projectRate)
+    source.start(sourceAt, offsetSeconds, playableSeconds)
     source.onended = () => this.sources.delete(source)
     this.sources.add(source)
   }
@@ -273,7 +296,7 @@ export class AudioEngine {
     for (const clip of project.clips) {
       const buffer = this.assetBuffers.get(clip.assetId)
       const graph = this.liveGraphs.get(clip.trackId)
-      if (buffer && graph) this.createSource(buffer, graph, project.audioSampleRate, clip.timelineStartFrame, clip.sourceOffsetFrame, clip.durationFrames, startFrame, startAt)
+      if (buffer && graph) this.createSource(buffer, graph, project.audioSampleRate, clip, startFrame, startAt)
     }
     this.playStartedAt = startAt
     this.playing = true
@@ -505,7 +528,9 @@ export class AudioEngine {
       const clipGain = offline.createGain()
       source.buffer = sourceBuffer
       source.connect(clipGain).connect(graph.highPass)
-      source.start(clip.timelineStartFrame / project.audioSampleRate, clip.sourceOffsetFrame / sourceBuffer.sampleRate, clip.durationFrames / project.audioSampleRate)
+      const sourceAt = clip.timelineStartFrame / project.audioSampleRate
+      this.applyClipEnvelope(clipGain, clip, sourceAt, 0, clip.durationFrames, project.audioSampleRate)
+      source.start(sourceAt, clip.sourceOffsetFrame / project.audioSampleRate, clip.durationFrames / project.audioSampleRate)
     }
     return offline.startRendering()
   }
