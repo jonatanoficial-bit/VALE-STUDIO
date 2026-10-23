@@ -81,6 +81,7 @@ export class AudioEngine {
   private assetBuffers = new Map<string, AudioBuffer>()
   private liveGraphs = new Map<string, TrackGraph>()
   private sources = new Set<AudioBufferSourceNode>()
+  private previewSource?: AudioBufferSourceNode
   private playheadStartFrame = 0
   private playStartedAt = 0
   private playing = false
@@ -144,6 +145,33 @@ export class AudioEngine {
 
   getCachedAsset(id: string): AudioBuffer | undefined {
     return this.assetBuffers.get(id)
+  }
+
+  previewAsset(id: string, onEnded?: () => void): boolean {
+    if (!this.context || !this.master) return false
+    const buffer = this.assetBuffers.get(id)
+    if (!buffer) return false
+    this.stopPreview()
+    const source = this.context.createBufferSource()
+    source.buffer = buffer
+    source.connect(this.master)
+    source.onended = () => {
+      if (this.previewSource === source) this.previewSource = undefined
+      onEnded?.()
+    }
+    this.previewSource = source
+    source.start()
+    return true
+  }
+
+  private stopPreview(): void {
+    if (!this.previewSource) return
+    try {
+      this.previewSource.stop()
+    } catch {
+      // A one-shot source may already have ended.
+    }
+    this.previewSource = undefined
   }
 
   cacheAsset(id: string, buffer: AudioBuffer): void {
@@ -284,8 +312,15 @@ export class AudioEngine {
     this.sources.add(source)
   }
 
+  private shouldPlayClip(project: AudioProject, clip: Clip): boolean {
+    if (!clip.takeId) return true
+    const take = project.takes.find((candidate) => candidate.id === clip.takeId)
+    return !take || take.selected
+  }
+
   play(project: AudioProject): void {
     if (!this.context || !this.master || this.playing) return
+    this.stopPreview()
     this.stopSources()
     const soloActive = project.tracks.some((track) => track.solo)
     const startAt = this.context.currentTime + 0.03
@@ -294,6 +329,7 @@ export class AudioEngine {
     project.tracks.forEach((track) => this.liveGraphs.set(track.id, this.makeTrackGraph(this.context!, track, this.master!, soloActive)))
 
     for (const clip of project.clips) {
+      if (!this.shouldPlayClip(project, clip)) continue
       const buffer = this.assetBuffers.get(clip.assetId)
       const graph = this.liveGraphs.get(clip.trackId)
       if (buffer && graph) this.createSource(buffer, graph, project.audioSampleRate, clip, startFrame, startAt)
@@ -311,6 +347,7 @@ export class AudioEngine {
 
   stop(): void {
     this.stopSources()
+    this.stopPreview()
     this.playing = false
     this.playheadStartFrame = 0
   }
@@ -521,6 +558,7 @@ export class AudioEngine {
     const graphs = new Map(project.tracks.map((track) => [track.id, this.makeTrackGraph(offline, track, master, soloActive)]))
 
     for (const clip of project.clips) {
+      if (!this.shouldPlayClip(project, clip)) continue
       const sourceBuffer = this.assetBuffers.get(clip.assetId)
       const graph = graphs.get(clip.trackId)
       if (!sourceBuffer || !graph) continue

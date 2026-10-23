@@ -45,6 +45,16 @@ test('preview e render usam a mesma linha de tempo por frames, com fades não de
   assert.match(app, /Compensação manual de posição/)
 })
 
+test('a seleção de take controla preview e render sem apagar versões alternativas', async () => {
+  const engine = await read('src/audio/AudioEngine.ts')
+  const app = await read('src/App.tsx')
+  assert.match(engine, /private shouldPlayClip/)
+  assert.match(engine, /previewAsset\(id: string/)
+  assert.match(app, /function selectTake/)
+  assert.match(app, /GERENCIAMENTO DE TAKES/)
+  assert.match(app, /Usar take/)
+})
+
 test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async () => {
   const engine = await read('src/audio/AudioEngine.ts')
   const main = await read('src/main.tsx')
