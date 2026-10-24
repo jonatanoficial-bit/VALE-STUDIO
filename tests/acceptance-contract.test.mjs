@@ -55,6 +55,20 @@ test('a seleção de take controla preview e render sem apagar versões alternat
   assert.match(app, /Usar take/)
 })
 
+test('backup portátil contém projeto e áudio e restaura uma cópia independente', async () => {
+  const archive = await read('src/storage/projectArchive.ts')
+  const repository = await read('src/storage/projectRepository.ts')
+  const app = await read('src/App.tsx')
+  assert.match(archive, /format: 'vale-studio-project'/)
+  assert.match(archive, /blobToBase64/)
+  assert.match(archive, /cloneForRestore/)
+  assert.match(archive, /crypto\.randomUUID\(\)/)
+  assert.match(repository, /async restoreProject/)
+  assert.match(repository, /database\.transaction\(\[PROJECT_STORE, ASSET_STORE\], 'readwrite'\)/)
+  assert.match(app, /Backup \.valestudio/)
+  assert.match(app, /A sessão original não foi alterada/)
+})
+
 test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async () => {
   const engine = await read('src/audio/AudioEngine.ts')
   const main = await read('src/main.tsx')

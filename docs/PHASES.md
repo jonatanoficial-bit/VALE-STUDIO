@@ -7,7 +7,7 @@ O plano respeita a ordem de risco da Bíblia Mestre: primeiro o áudio preservad
 | 1. Fundação local-first | Projeto, importação, Web Audio, AudioWorklet, mixer/efeitos, render, PWA e base de testes. | Concluída na fundação publicada. |
 | 2. Integridade de gravação | Journal PCM durante a captura, recuperação de rascunho e commit atômico de projeto/asset/take. | Concluída em código; falta validação em hardware e crash real. |
 | 3. Precisão de sessão | Transporte por frames, overdub, edição e fades robustos, calibração por loopback e tratamento de drift. | Em andamento: offset, fades, takes alternativos e coerência de timeline iniciados; loopback e drift pendentes. |
-| 4. Portabilidade e continuidade | Backup/restauração `.valestudio`, exports/stems validados, PWA offline/upgrade e limites de armazenamento. | Pendente. |
+| 4. Portabilidade e continuidade | Backup/restauração `.valestudio`, exports/stems validados, PWA offline/upgrade e limites de armazenamento. | Em andamento: backup local autocontido e restauração como cópia independente implementados; stems, validação de upgrade e limites permanecem pendentes. |
 | 5. Aceite de release | Execução documentada de A01–A70, múltiplos navegadores/dispositivos, permissões, interrupções e auditoria de licenças. | Pendente; é a única etapa que pode declarar RC. |
 
 ## Limite de cada etapa

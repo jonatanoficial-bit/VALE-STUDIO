@@ -4,6 +4,7 @@ import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track } from './domain/model'
 import { createProject, createTrack, gainToDb } from './domain/model'
+import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
@@ -75,6 +76,7 @@ export default function App() {
   const engineRef = useRef(new AudioEngine())
   const activeDraftRef = useRef<{ id: string; projectId: string; trackId: string } | undefined>(undefined)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const archiveInputRef = useRef<HTMLInputElement>(null)
   const [projects, setProjects] = useState<AudioProject[]>([])
   const [project, setProject] = useState<AudioProject>()
   const [view, setView] = useState<View>('tracks')
@@ -92,6 +94,7 @@ export default function App() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [exporting, setExporting] = useState<'wav' | 'mp3'>()
   const [previewingTakeId, setPreviewingTakeId] = useState<string>()
+  const [archiving, setArchiving] = useState<'export' | 'import'>()
   const [takeDrafts, setTakeDrafts] = useState<TakeDraft[]>([])
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
@@ -252,6 +255,45 @@ export default function App() {
     } catch {
       setToast({ tone: 'error', text: 'O navegador não conseguiu decodificar este áudio. O projeto não foi alterado.' })
     }
+  }
+
+  async function exportBackup() {
+    if (!project) return
+    try {
+      setArchiving('export')
+      const blob = await exportProjectArchive(project)
+      const href = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = `${project.name.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase() || 'vale-studio'}${PROJECT_ARCHIVE_EXTENSION}`
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(href), 5000)
+      setToast({ tone: 'success', text: 'Backup .valestudio criado com o projeto e seus áudios locais.' })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível criar o backup local.' })
+    } finally { setArchiving(undefined) }
+  }
+
+  async function importBackup(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      setArchiving('import')
+      const restored = await restoreProjectArchive(file)
+      await projectRepository.restoreProject(restored.project, restored.assets)
+      engineRef.current.stop()
+      setIsPlaying(false)
+      setIsRecording(false)
+      setProject(restored.project)
+      setSelectedTrackId(restored.project.tracks[0]?.id)
+      setSelectedClipId(restored.project.clips[0]?.id)
+      setView('tracks')
+      void projectRepository.listProjects().then(setProjects)
+      setToast({ tone: 'success', text: `Backup restaurado como “${restored.project.name}”. A sessão original não foi alterada.` })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível restaurar este backup.' })
+    } finally { setArchiving(undefined) }
   }
 
   function addTrack() {
@@ -502,8 +544,9 @@ export default function App() {
   if (!project) return <main className="app-shell home-shell">
     <header className="home-header"><Logo /><button className="icon-button" type="button" aria-label="Ajuda">?</button></header>
     <section className="hero"><div className="eyebrow">ESTÚDIO MULTIPISTA LOCAL</div><h1>Grave. Crie.<br /><span>Misture.</span></h1><p>Seu estúdio multipista em qualquer lugar, sem conta e sem enviar seu áudio para a nuvem.</p><div className="hero-line" /></section>
-    <section className="home-actions"><button className="button primary large" onClick={() => setShowNewProject(true)}><b>＋</b><span>Novo projeto<small>Comece uma nova ideia</small></span></button><button className="button secondary large" onClick={() => fileInputRef.current?.click()}><b>↥</b><span>Importar áudio<small>WAV, MP3 ou formato compatível</small></span></button></section>
+    <section className="home-actions"><button className="button primary large" onClick={() => setShowNewProject(true)}><b>＋</b><span>Novo projeto<small>Comece uma nova ideia</small></span></button><button className="button secondary large" onClick={() => fileInputRef.current?.click()}><b>↥</b><span>Importar áudio<small>WAV, MP3 ou formato compatível</small></span></button><button className="button secondary large archive-action" onClick={() => archiveInputRef.current?.click()} disabled={archiving === 'import'}><b>⇩</b><span>{archiving === 'import' ? 'Restaurando backup…' : 'Restaurar backup'}<small>Abra uma cópia independente em .valestudio</small></span></button></section>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
+    <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
     <section className="recent-projects"><div className="section-title"><h2>Projetos recentes</h2><span>{projects.length} local{projects.length === 1 ? '' : 'is'}</span></div>{projects.length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum projeto salvo ainda.</p><small>Crie um projeto para começar a gravar.</small></div> : projects.map((item) => <button className="project-card" key={item.id} onClick={() => openProject(item)}><span className="project-orb">V</span><span><strong>{item.name}</strong><small>{dateLabel(item.updatedAt)} · {item.tracks.length} pista{item.tracks.length === 1 ? '' : 's'} · {item.assets.length} áudio{item.assets.length === 1 ? '' : 's'}</small></span><i>›</i></button>)}</section>
     <footer className="home-footer"><span className="status-dot" />Dados locais · {storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados` : 'armazenamento será verificado no dispositivo'}</footer>
     {showNewProject && <NewProjectDialog onCreate={createNewProject} onCancel={() => setShowNewProject(false)} />}{toast && <div className={`toast ${toast.tone}`}>{toast.text}</div>}
@@ -526,10 +569,11 @@ export default function App() {
 
     {view === 'takes' && <section className="takes-view"><div className="view-intro"><div><span className="eyebrow">GERENCIAMENTO DE TAKES</span><h2>{selectedTrack?.name ?? 'Selecione uma pista'}</h2><p>Somente o take marcado como ativo de cada pista entra na prévia e na renderização. A troca não apaga nenhuma versão.</p></div><select value={selectedTrack?.id ?? ''} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div>{selectedTrack && project.takes.filter((take) => take.trackId === selectedTrack.id).length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum take nesta pista.</p><small>Arme a pista e grave para criar versões recuperáveis.</small></div> : <div className="take-list">{project.takes.filter((take) => take.trackId === selectedTrack?.id).map((take, index) => { const asset = activeAssetById.get(take.assetId); return <article key={take.id} className={`take-card ${take.selected ? 'selected' : ''}`}><div className="take-wave"><Waveform peaks={asset?.peaks ?? [0]} color={selectedTrack?.color ?? '#1eaeff'} /></div><div className="take-copy"><small>TAKE {String(index + 1).padStart(2, '0')} · {take.selected ? 'ATIVO' : 'ALTERNATIVO'}</small><strong>{take.name}</strong><span>{formatDuration(take.durationFrames, project.audioSampleRate)} · início {formatDuration(take.startFrame, project.audioSampleRate)}</span></div><div className="take-actions"><button className="button secondary" onClick={() => void previewTake(take.id)}>{previewingTakeId === take.id ? 'Ouvindo…' : 'Ouvir'}</button><button className={`button ${take.selected ? 'selected-take' : 'primary'}`} onClick={() => selectTake(take.id)}>{take.selected ? 'Em uso' : 'Usar take'}</button></div></article> })}</div>}</section>}
 
-    {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize uma mixagem local.</h3><p>WAV é PCM estéreo. MP3 usa encoder MPEG Layer III incluído no bundle.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
+    {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize uma mixagem local.</h3><p>WAV é PCM estéreo. MP3 usa encoder MPEG Layer III incluído no bundle.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
     <nav className="bottom-nav" aria-label="Navegação do estúdio">{([{ id: 'tracks', label: 'Pistas', icon: '≋' }, { id: 'mixer', label: 'Mixer', icon: '▥' }, { id: 'effects', label: 'Efeitos', icon: '◌' }, { id: 'takes', label: 'Takes', icon: '◫' }, { id: 'project', label: 'Projeto', icon: '◇' }] as const).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</nav>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
+    <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
     {toast && <div className={`toast ${toast.tone}`}>{toast.text}<button onClick={() => setToast(undefined)} aria-label="Fechar aviso">×</button></div>}
   </main>
 }
