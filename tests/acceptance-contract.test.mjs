@@ -69,6 +69,19 @@ test('backup portátil contém projeto e áudio e restaura uma cópia independen
   assert.match(app, /A sessão original não foi alterada/)
 })
 
+test('stems usam render offline alinhado e seguem em um ZIP local', async () => {
+  const engine = await read('src/audio/AudioEngine.ts')
+  const zip = await read('src/audio/zip.ts')
+  const app = await read('src/App.tsx')
+  assert.match(engine, /private renderLength/)
+  assert.match(engine, /async renderStem/)
+  assert.match(engine, /async exportStems/)
+  assert.match(zip, /0x04034b50/)
+  assert.match(zip, /application\/zip/)
+  assert.match(app, /Stems WAV \(\.zip\)/)
+  assert.match(app, /alinhados desde 00:00/)
+})
+
 test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async () => {
   const engine = await read('src/audio/AudioEngine.ts')
   const main = await read('src/main.tsx')

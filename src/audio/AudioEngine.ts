@@ -50,6 +50,12 @@ export type RecordingStart = {
   startFrame: number
 }
 
+export type StemExport = {
+  trackId: string
+  trackName: string
+  blob: Blob
+}
+
 function createImpulse(context: BaseAudioContext, seconds = 1.2): AudioBuffer {
   const length = Math.max(1, Math.floor(context.sampleRate * seconds))
   const impulse = context.createBuffer(2, length, context.sampleRate)
@@ -546,11 +552,27 @@ export class AudioEngine {
     return this.recordingStartFrame
   }
 
-  async renderMix(project: AudioProject): Promise<AudioBuffer> {
-    if (!this.context) throw new Error('Ative o áudio antes de exportar.')
+  private renderLength(project: AudioProject): number {
     const lastFrame = project.clips.reduce((maximum, clip) => Math.max(maximum, clip.timelineStartFrame + clip.durationFrames), 0)
     const tailFrames = Math.round(project.audioSampleRate * 1.5)
-    const offline = new OfflineAudioContext(2, Math.max(project.audioSampleRate, lastFrame + tailFrames), project.audioSampleRate)
+    return Math.max(project.audioSampleRate, lastFrame + tailFrames)
+  }
+
+  private scheduleRenderClip(offline: OfflineAudioContext, project: AudioProject, clip: Clip, graph: TrackGraph): void {
+    const sourceBuffer = this.assetBuffers.get(clip.assetId)
+    if (!sourceBuffer) return
+    const source = offline.createBufferSource()
+    const clipGain = offline.createGain()
+    source.buffer = sourceBuffer
+    source.connect(clipGain).connect(graph.highPass)
+    const sourceAt = clip.timelineStartFrame / project.audioSampleRate
+    this.applyClipEnvelope(clipGain, clip, sourceAt, 0, clip.durationFrames, project.audioSampleRate)
+    source.start(sourceAt, clip.sourceOffsetFrame / project.audioSampleRate, clip.durationFrames / project.audioSampleRate)
+  }
+
+  async renderMix(project: AudioProject): Promise<AudioBuffer> {
+    if (!this.context) throw new Error('Ative o áudio antes de exportar.')
+    const offline = new OfflineAudioContext(2, this.renderLength(project), project.audioSampleRate)
     const master = offline.createGain()
     master.gain.value = 0.92
     master.connect(offline.destination)
@@ -559,16 +581,25 @@ export class AudioEngine {
 
     for (const clip of project.clips) {
       if (!this.shouldPlayClip(project, clip)) continue
-      const sourceBuffer = this.assetBuffers.get(clip.assetId)
       const graph = graphs.get(clip.trackId)
-      if (!sourceBuffer || !graph) continue
-      const source = offline.createBufferSource()
-      const clipGain = offline.createGain()
-      source.buffer = sourceBuffer
-      source.connect(clipGain).connect(graph.highPass)
-      const sourceAt = clip.timelineStartFrame / project.audioSampleRate
-      this.applyClipEnvelope(clipGain, clip, sourceAt, 0, clip.durationFrames, project.audioSampleRate)
-      source.start(sourceAt, clip.sourceOffsetFrame / project.audioSampleRate, clip.durationFrames / project.audioSampleRate)
+      if (!graph) continue
+      this.scheduleRenderClip(offline, project, clip, graph)
+    }
+    return offline.startRendering()
+  }
+
+  async renderStem(project: AudioProject, trackId: string): Promise<AudioBuffer> {
+    if (!this.context) throw new Error('Ative o áudio antes de exportar.')
+    const track = project.tracks.find((item) => item.id === trackId)
+    if (!track) throw new Error('A pista deste stem não existe mais.')
+    const offline = new OfflineAudioContext(2, this.renderLength(project), project.audioSampleRate)
+    const master = offline.createGain()
+    master.gain.value = 0.92
+    master.connect(offline.destination)
+    const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, master, false)
+    for (const clip of project.clips) {
+      if (clip.trackId !== trackId || !this.shouldPlayClip(project, clip)) continue
+      this.scheduleRenderClip(offline, project, clip, graph)
     }
     return offline.startRendering()
   }
@@ -576,5 +607,15 @@ export class AudioEngine {
   async exportMix(project: AudioProject, format: 'wav' | 'mp3'): Promise<Blob> {
     const buffer = await this.renderMix(project)
     return format === 'wav' ? encodeWav(buffer, 24) : encodeMp3(buffer, 192)
+  }
+
+  async exportStems(project: AudioProject): Promise<StemExport[]> {
+    const tracksWithAudio = project.tracks.filter((track) => project.clips.some((clip) => clip.trackId === track.id && this.shouldPlayClip(project, clip)))
+    const stems: StemExport[] = []
+    for (const track of tracksWithAudio) {
+      const buffer = await this.renderStem(project, track.id)
+      stems.push({ trackId: track.id, trackName: track.name, blob: encodeWav(buffer, 24) })
+    }
+    return stems
   }
 }
