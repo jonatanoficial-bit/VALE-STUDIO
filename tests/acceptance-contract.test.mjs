@@ -88,3 +88,14 @@ test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async
   assert.match(engine, /import\.meta\.env\.BASE_URL/)
   assert.match(main, /import\.meta\.env\.BASE_URL/)
 })
+
+test('a mesma interface prioriza toque no mobile e densidade útil no desktop', async () => {
+  const app = await read('src/App.tsx')
+  const styles = await read('src/styles.css')
+  assert.match(app, /aria-current=\{view === item\.id \? 'page' : undefined\}/)
+  assert.match(styles, /--touch: 46px/)
+  assert.match(styles, /safe-area-inset-bottom/)
+  assert.match(styles, /@media \(max-width: 540px\)/)
+  assert.match(styles, /@media \(min-width: 840px\)/)
+  assert.match(styles, /grid-template-areas: "header header" "hero actions" "recent recent" "footer footer"/)
+})
