@@ -57,6 +57,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .project-card { min-height: 66px; border-color: #24425e; }
 .project-card:focus-visible, .audio-clip:focus-visible { outline-offset: 2px; }
 .studio-header { min-height: 66px; background: #06111deb; border-color: #1c3852; }
+.update-chip { color: #d9f6ff; border-color: #398fc0; background: linear-gradient(135deg, #0a7fc2, #1552a8); box-shadow: 0 0 18px #1598e33d; }
+.update-chip:disabled { color: #718da3; border-color: #29445b; background: #0b1b2b; box-shadow: none; }
 .transport { min-height: 80px; background: linear-gradient(90deg, #06111d, #091725); border-color: #1b3852; }
 .transport-button, .metro-button { min-width: 44px; min-height: 44px; height: 44px; border-color: #2a4b67; }
 .record-button { width: 44px; height: 44px; box-shadow: 0 0 20px #f837451c; }

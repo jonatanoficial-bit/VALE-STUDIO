@@ -28,7 +28,7 @@ pnpm build
 
 ## Publicação
 
-O workflow `.github/workflows/deploy-pages.yml` constrói a aplicação com caminhos relativos, adequados a `/VALE-STUDIO/`, e a publica em GitHub Pages após os gates locais. O service worker usa navegação network-first e não força takeover de uma sessão ativa. No repositório do GitHub, habilite **Settings → Pages → Build and deployment → GitHub Actions**.
+O workflow `.github/workflows/deploy-pages.yml` constrói a aplicação com caminhos relativos, adequados a `/VALE-STUDIO/`, e a publica em GitHub Pages após os gates locais. O service worker usa navegação network-first e não força takeover de uma sessão ativa: quando houver uma versão nova, o app só a aplica após a confirmação do usuário e nunca no meio de uma gravação. No repositório do GitHub, habilite **Settings → Pages → Build and deployment → GitHub Actions**.
 
 ## Privacidade
 

@@ -1,4 +1,4 @@
-const CACHE = 'vale-studio-shell-v0.1.1'
+const CACHE = 'vale-studio-shell-v0.1.2'
 const OFFLINE_FALLBACK = './offline.html'
 
 self.addEventListener('install', (event) => {
@@ -7,7 +7,14 @@ self.addEventListener('install', (event) => {
 })
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('vale-studio-shell-') && key !== CACHE).map((key) => caches.delete(key)))))
+  event.waitUntil(Promise.all([
+    caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('vale-studio-shell-') && key !== CACHE).map((key) => caches.delete(key)))),
+    self.clients.claim(),
+  ]))
+})
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'VALE_STUDIO_SKIP_WAITING') self.skipWaiting()
 })
 
 self.addEventListener('fetch', (event) => {

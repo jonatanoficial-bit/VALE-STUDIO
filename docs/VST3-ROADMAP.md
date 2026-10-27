@@ -6,6 +6,18 @@ O Vale Studio publicado no GitHub Pages continuará como DAW web local-first com
 
 O suporte VST3 é viável como uma edição **Vale Studio Desktop** para Windows e macOS, mantendo a mesma interface React e o formato de projeto. A primeira entrega VST3 será renderização offline de um insert por pista; monitoramento VST em tempo real virá apenas depois de o motor de áudio nativo passar em medições de latência e estabilidade.
 
+## Caminhos sem custo de licença
+
+| Caminho | Custo de licença | Preserva o que já existe? | Indicação |
+| --- | --- | --- | --- |
+| **Recomendado: Tauri + host C++ próprio + VST3 SDK** | Nenhum para desenvolver e distribuir sem assinatura de código. Tauri é MIT/Apache-2.0 e o VST3 SDK atual é MIT. | **Sim.** React, a interface, o projeto `.valestudio`, backups e o motor Web Audio continuam; somente a edição Desktop acrescenta um processo nativo de plug-ins. | Melhor equilíbrio entre independência, segurança e continuidade. Começar por render offline. |
+| **App desktop open source com JUCE sob AGPL** | Sem custo financeiro, mas todo o aplicativo distribuído precisa cumprir AGPL. | Parcialmente; o frontend pode continuar, porém a licença do produto muda. | Só faz sentido se o Vale Studio for publicado como software livre sob AGPL. |
+| **Web/PWA atual** | Zero. | Já é o produto atual. | Mantém efeitos nativos Web Audio; não hospeda arquivos `.vst3`. |
+
+O caminho recomendado não obriga apagar ou reescrever a versão web: o host recebe comandos de projeto por uma bridge estreita, executa scan/render VST3 fora da interface e devolve áudio renderizado, níveis e parâmetros. Para a primeira entrega gratuita, limite a compatibilidade a **Windows x64**, escolha uma pasta de plug-ins explicitamente, rode o scanner em processo isolado, tenha bypass/blacklist e ofereça controles genéricos de parâmetros. Só depois acrescente editor gráfico e áudio VST em tempo real.
+
+Distribuir executáveis sem custo continua possível, mas pode gerar alertas de reputação do sistema sem assinatura de código. Para macOS, assinatura/notarização e ferramentas/plataformas de teste podem impor custos ou contas próprias; por isso “sem custo” é mais realista para desenvolvimento e uso no Windows do que para uma distribuição macOS polida.
+
 ## Arquitetura proposta
 
 ```text

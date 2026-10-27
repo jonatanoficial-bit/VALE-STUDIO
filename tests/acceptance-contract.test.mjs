@@ -89,6 +89,22 @@ test('assets e worklet são resolvidos contra BASE_URL para GitHub Pages', async
   assert.match(main, /import\.meta\.env\.BASE_URL/)
 })
 
+test('a atualização PWA espera confirmação e nunca assume durante uma gravação', async () => {
+  const app = await read('src/App.tsx')
+  const main = await read('src/main.tsx')
+  const worker = await read('public/sw.js')
+  assert.match(main, /SERVICE_WORKER_UPDATE_EVENT/)
+  assert.match(main, /registration\.waiting/)
+  assert.match(main, /controllerchange/)
+  assert.match(worker, /VALE_STUDIO_SKIP_WAITING/)
+  assert.match(worker, /self\.skipWaiting\(\)/)
+  assert.match(worker, /self\.clients\.claim\(\)/)
+  assert.match(app, /applyPendingUpdate/)
+  assert.match(app, /if \(isRecording\)/)
+  assert.match(app, /Finalize a gravação antes de atualizar/)
+  assert.match(app, /Salvar e atualizar/)
+})
+
 test('a mesma interface prioriza toque no mobile e densidade útil no desktop', async () => {
   const app = await read('src/App.tsx')
   const styles = await read('src/styles.css')
