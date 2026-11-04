@@ -51,7 +51,8 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     const inserts = item?.vst3Inserts
     const hasInvalidInsert = inserts !== undefined && (!Array.isArray(inserts) || inserts.some((insert) => {
       const value = asRecord(insert)
-      return !value || typeof value.id !== 'string' || value.format !== 'vst3' || typeof value.bundlePath !== 'string' || typeof value.classId !== 'string' || typeof value.name !== 'string' || typeof value.vendor !== 'string' || typeof value.version !== 'string' || typeof value.bypass !== 'boolean' || !asRecord(value.parameterValues) || (value.stateBase64 !== undefined && typeof value.stateBase64 !== 'string')
+      const parameterValues = asRecord(value?.parameterValues)
+      return !value || typeof value.id !== 'string' || value.format !== 'vst3' || typeof value.bundlePath !== 'string' || typeof value.classId !== 'string' || typeof value.name !== 'string' || typeof value.vendor !== 'string' || typeof value.version !== 'string' || typeof value.bypass !== 'boolean' || !parameterValues || Object.values(parameterValues).some((parameter) => typeof parameter !== 'number' || !Number.isFinite(parameter)) || (value.stateBase64 !== undefined && typeof value.stateBase64 !== 'string')
     }))
     return !item || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || hasInvalidInsert || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))
   })

@@ -3,15 +3,16 @@ import { AudioEngine, type AudioCapabilities } from './audio/AudioEngine'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
-import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track } from './domain/model'
+import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
 import { createProject, createTrack, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
-import { chooseVst3Directory, isDesktopRuntime, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
+import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
 import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
 type Toast = { tone: 'info' | 'error' | 'success'; text: string } | undefined
+type Vst3ProbeState = { status: 'checking' | 'compatible' | 'incompatible'; message: string }
 
 const TRACK_COLORS = ['#1eaeff', '#a855f7', '#ff9e3d', '#f5cd36', '#1ed6b5', '#5d71ff']
 
@@ -112,6 +113,7 @@ export default function App() {
   const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>([])
   const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
   const [isScanningVst3, setIsScanningVst3] = useState(false)
+  const [vst3ProbeStates, setVst3ProbeStates] = useState<Record<string, Vst3ProbeState>>({})
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
 
@@ -205,6 +207,54 @@ export default function App() {
     }
     const directory = await chooseVst3Directory()
     if (directory) await scanVst3Plugins(directory)
+  }
+
+  function addVst3Insert(plugin: Vst3Plugin) {
+    if (!desktopRuntime || !selectedTrack) {
+      setToast({ tone: 'info', text: 'Selecione uma pista no Vale Studio Desktop para preparar um insert VST3.' })
+      return
+    }
+    if (selectedTrack.vst3Inserts.some((insert) => insert.bundlePath === plugin.bundlePath && insert.classId === plugin.classId)) {
+      setToast({ tone: 'info', text: `${plugin.name} já está na cadeia de ${selectedTrack.name}.` })
+      return
+    }
+    const insert: Vst3Insert = {
+      id: makeId(),
+      format: 'vst3',
+      bundlePath: plugin.bundlePath,
+      classId: plugin.classId,
+      name: plugin.name,
+      vendor: plugin.vendor,
+      version: plugin.version,
+      bypass: true,
+      parameterValues: {},
+    }
+    updateTrack(selectedTrack.id, (track) => ({ ...track, vst3Inserts: [...track.vst3Inserts, insert] }))
+    setToast({ tone: 'success', text: `${plugin.name} foi salvo em bypass na cadeia de ${selectedTrack.name}.` })
+    void probeVst3Insert(insert)
+  }
+
+  async function probeVst3Insert(insert: Vst3Insert) {
+    if (!desktopRuntime) return
+    setVst3ProbeStates((states) => ({ ...states, [insert.id]: { status: 'checking', message: 'Abrindo componente em processo isolado…' } }))
+    try {
+      const result = await probeVst3Plugin(insert)
+      const state: Vst3ProbeState = { status: result.compatible ? 'compatible' : 'incompatible', message: result.message }
+      setVst3ProbeStates((states) => ({ ...states, [insert.id]: state }))
+      setToast({ tone: result.compatible ? 'success' : 'error', text: `${insert.name}: ${result.message}` })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Não foi possível qualificar este plug-in VST3.'
+      setVst3ProbeStates((states) => ({ ...states, [insert.id]: { status: 'incompatible', message } }))
+      setToast({ tone: 'error', text: message })
+    }
+  }
+
+  function toggleVst3Insert(trackId: string, insertId: string) {
+    updateTrack(trackId, (track) => ({ ...track, vst3Inserts: track.vst3Inserts.map((insert) => insert.id === insertId ? { ...insert, bypass: !insert.bypass } : insert) }))
+  }
+
+  function removeVst3Insert(trackId: string, insertId: string) {
+    updateTrack(trackId, (track) => ({ ...track, vst3Inserts: track.vst3Inserts.filter((insert) => insert.id !== insertId) }))
   }
 
   async function applyPendingUpdate() {
@@ -671,6 +721,10 @@ export default function App() {
 
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
+    {view === 'effects' && selectedTrack && <Vst3InsertRack track={selectedTrack} desktopRuntime={desktopRuntime} probeStates={vst3ProbeStates} onProbe={probeVst3Insert} onToggle={toggleVst3Insert} onRemove={removeVst3Insert} />}
+
+    {view === 'project' && desktopRuntime && vst3Plugins.length > 0 && <Vst3CatalogInsert plugins={vst3Plugins} track={selectedTrack} onInsert={addVst3Insert} />}
+
     {view === 'project' && <section className={`desktop-vst3-panel ${desktopRuntime ? 'desktop-ready' : ''}`}><div><span className="eyebrow">VST3 DESKTOP</span><h3>{desktopRuntime ? 'Catálogo de plug-ins VST3' : 'Plug-ins VST3 exigem o app Desktop'}</h3><p>{desktopRuntime ? 'Escolha uma pasta sua. A inspeção acontece em um processo nativo separado, com prazo de segurança; o app web não abre arquivos .vst3.' : 'No navegador, continue usando os efeitos nativos. O suporte VST3 aparece apenas no instalador Vale Studio para Windows.'}</p></div><div className="vst3-actions"><button className="button secondary" onClick={() => void chooseAndScanVst3Directory()} disabled={isScanningVst3}>{isScanningVst3 ? 'Verificando…' : desktopRuntime ? 'Escolher pasta VST3' : 'Como usar no Desktop'}</button>{desktopRuntime && vst3Directory && <button className="link-button" onClick={() => void scanVst3Plugins(vst3Directory)} disabled={isScanningVst3}>Verificar novamente</button>}</div>{vst3Directory && <small className="vst3-directory">Pasta escolhida: {vst3Directory}</small>}{vst3Plugins.length > 0 && <div className="vst3-plugin-list">{vst3Plugins.map((plugin) => <article key={`${plugin.bundlePath}:${plugin.classId}`}><span>VST3</span><div><strong>{plugin.name}</strong><small>{plugin.vendor || 'Fabricante não informado'} · {plugin.version || 'versão não informada'}</small></div><code>{plugin.classId}</code></article>)}</div>}{vst3ScanErrors.length > 0 && <details className="vst3-errors"><summary>{vst3ScanErrors.length} item{vst3ScanErrors.length === 1 ? '' : 's'} não pôde{vst3ScanErrors.length === 1 ? '' : 'ram'} ser inspecionado{vst3ScanErrors.length === 1 ? '' : 's'}</summary><ul>{vst3ScanErrors.slice(0, 8).map((error) => <li key={error}>{error}</li>)}</ul></details>}</section>}
     <nav className="bottom-nav" aria-label="Navegação do estúdio">{([{ id: 'tracks', label: 'Pistas', icon: '≋' }, { id: 'mixer', label: 'Mixer', icon: '▥' }, { id: 'effects', label: 'Efeitos', icon: '◌' }, { id: 'takes', label: 'Takes', icon: '◫' }, { id: 'project', label: 'Projeto', icon: '◇' }] as const).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</nav>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
@@ -685,4 +739,16 @@ function RangeControl({ label, value, min, max, suffix, step = 1, onChange }: { 
 
 function EffectCard({ title, active, onToggle, children }: { title: string; active: boolean; onToggle: () => void; children: React.ReactNode }) {
   return <article className={`effect-card ${active ? 'active' : ''}`}><div><span className="effect-indicator" /><h3>{title}</h3><button type="button" className="effect-toggle" aria-pressed={active} onClick={onToggle}>{active ? 'Ativo' : 'Bypass'}</button></div>{children}</article>
+}
+
+function Vst3CatalogInsert({ plugins, track, onInsert }: { plugins: Vst3Plugin[]; track?: Track; onInsert: (plugin: Vst3Plugin) => void }) {
+  const [selectedKey, setSelectedKey] = useState('')
+  const selectedPlugin = plugins.find((plugin) => `${plugin.bundlePath}:${plugin.classId}` === selectedKey) ?? plugins[0]
+  if (!track || !selectedPlugin) return null
+  return <section className="vst3-insert-picker"><div><span className="eyebrow">CADEIA DA PISTA</span><h3>Preparar insert em {track.name}</h3><p>O plug-in é salvo no projeto com identidade e bypass. A renderização VST3 nativa ainda será ativada no próximo marco.</p></div><div className="vst3-picker-actions"><select aria-label="Plug-in VST3 para inserir" value={`${selectedPlugin.bundlePath}:${selectedPlugin.classId}`} onChange={(event) => setSelectedKey(event.target.value)}>{plugins.map((plugin) => <option key={`${plugin.bundlePath}:${plugin.classId}`} value={`${plugin.bundlePath}:${plugin.classId}`}>{plugin.name} — {plugin.vendor || 'VST3'}</option>)}</select><button className="button primary" onClick={() => onInsert(selectedPlugin)}>Inserir no projeto</button></div></section>
+}
+
+function Vst3InsertRack({ track, desktopRuntime, probeStates, onProbe, onToggle, onRemove }: { track: Track; desktopRuntime: boolean; probeStates: Record<string, Vst3ProbeState>; onProbe: (insert: Vst3Insert) => void; onToggle: (trackId: string, insertId: string) => void; onRemove: (trackId: string, insertId: string) => void }) {
+  if (track.vst3Inserts.length === 0) return null
+  return <section className="vst3-insert-rack"><div className="vst3-rack-heading"><div><span className="eyebrow">INSERÇÕES VST3</span><h3>Cadeia de {track.name}</h3><p>{desktopRuntime ? 'Identidade, ordem e bypass ficam salvos localmente. Cada componente pode ser qualificado em processo isolado antes do render VST3 desktop.' : 'Este projeto preserva os inserts, mas a versão web usa apenas os efeitos nativos.'}</p></div><span>{track.vst3Inserts.length} insert{track.vst3Inserts.length === 1 ? '' : 's'}</span></div><div className="vst3-insert-list">{track.vst3Inserts.map((insert, index) => { const probe = probeStates[insert.id]; return <article key={insert.id}><span className="vst3-order">{String(index + 1).padStart(2, '0')}</span><div><strong>{insert.name}</strong><small>{probe?.message ?? `${insert.vendor || 'Fabricante não informado'} · ${insert.version || 'versão não informada'}`}</small></div><span className={`vst3-state ${probe?.status === 'compatible' ? 'compatible' : probe?.status === 'incompatible' ? 'incompatible' : insert.bypass ? 'bypassed' : 'armed'}`}>{probe?.status === 'checking' ? 'TESTANDO' : probe?.status === 'compatible' ? 'VALIDADO' : probe?.status === 'incompatible' ? 'FALHOU' : insert.bypass ? 'BYPASS' : 'PREPARADO'}</span><div className="vst3-insert-actions"><button className="button secondary" disabled={!desktopRuntime || probe?.status === 'checking'} onClick={() => onProbe(insert)}>{probe?.status === 'checking' ? 'Testando…' : 'Verificar'}</button><button className="button secondary" disabled={!desktopRuntime} onClick={() => onToggle(track.id, insert.id)}>{insert.bypass ? 'Preparar' : 'Bypass'}</button><button className="link-button destructive-link" onClick={() => onRemove(track.id, insert.id)}>Remover</button></div></article> })}</div></section>
 }

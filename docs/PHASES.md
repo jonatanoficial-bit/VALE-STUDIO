@@ -12,7 +12,7 @@ O plano respeita a ordem de risco da Bíblia Mestre: primeiro o áudio preservad
 
 ## Extensão Desktop VST3 — Windows x64
 
-Em construção paralela, sem alterar o comportamento web: shell Tauri, bridge com comandos tipados e scanner C++ isolado para classes de efeito VST3 foram adicionados ao repositório. A geração do instalador ainda depende de Rust, CMake, Microsoft C++ Build Tools e do SDK VST3 no ambiente de compilação. O scan de catálogo não é ainda um insert/processamento VST3 no mixer; render offline, parâmetros, estado e tempo real continuam os próximos marcos do roadmap.
+Em construção paralela, sem alterar o comportamento web: shell Tauri, bridge com comandos tipados e scanner C++ isolado para classes de efeito VST3 foram adicionados ao repositório. O instalador Windows x64 é gerado em CI sem certificado de assinatura. Uma classe encontrada no catálogo agora pode entrar na cadeia de uma pista e sua identidade, ordem, bypass e parâmetros são preservados no projeto/backup; o host pode qualificá-la isoladamente, instanciando e ativando a classe em 48 kHz. Scan, qualificação e cadeia ainda não equivalem a DSP VST3: render offline, parâmetros aplicados, editor gráfico e tempo real continuam os próximos marcos do roadmap.
 
 ## Limite de cada etapa
 

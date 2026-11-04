@@ -11,6 +11,11 @@ export type Vst3ScanResult = {
   errors: string[]
 }
 
+export type Vst3ProbeResult = {
+  compatible: boolean
+  message: string
+}
+
 type TauriCore = {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>
 }
@@ -37,4 +42,10 @@ export async function scanVst3Directory(directory: string): Promise<Vst3ScanResu
   const core = nativeCore()
   if (!core) throw new Error('A busca por VST3 está disponível apenas no Vale Studio Desktop.')
   return core.invoke<Vst3ScanResult>('scan_vst3', { directory })
+}
+
+export async function probeVst3Plugin(plugin: Vst3Plugin): Promise<Vst3ProbeResult> {
+  const core = nativeCore()
+  if (!core) throw new Error('A qualificação VST3 está disponível apenas no Vale Studio Desktop.')
+  return core.invoke<Vst3ProbeResult>('probe_vst3', { bundlePath: plugin.bundlePath, classId: plugin.classId })
 }
