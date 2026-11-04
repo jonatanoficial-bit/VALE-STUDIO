@@ -1,6 +1,6 @@
 # VALE STUDIO
 
-DAW web local-first, mobile-first e desktop, construída a partir da Bíblia Mestre v1.1. A identidade visual usa superfícies azul-grafite, ação em azul elétrico e REC em vermelho, conforme as referências recebidas.
+DAW local-first, mobile-first e desktop, construída a partir da Bíblia Mestre v1.1. A identidade visual usa superfícies azul-grafite, ação em azul elétrico e REC em vermelho, conforme as referências recebidas.
 
 ## Estado desta entrega
 
@@ -40,3 +40,4 @@ Não há login, analytics, upload compulsório ou dependência de backend. Áudi
 - [Matriz de aceitação](docs/ACCEPTANCE.md)
 - [Plano de cinco etapas](docs/PHASES.md)
 - [Roadmap de suporte VST3 em desktop](docs/VST3-ROADMAP.md)
+- [Preparação do Vale Studio Desktop para Windows](docs/DESKTOP-WINDOWS.md)

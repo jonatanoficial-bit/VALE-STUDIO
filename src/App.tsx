@@ -7,6 +7,7 @@ import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track 
 import { createProject, createTrack, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
+import { chooseVst3Directory, isDesktopRuntime, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
 import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
@@ -104,6 +105,10 @@ export default function App() {
   const [archiving, setArchiving] = useState<'export' | 'import'>()
   const [takeDrafts, setTakeDrafts] = useState<TakeDraft[]>([])
   const [updateReady, setUpdateReady] = useState(false)
+  const [vst3Directory, setVst3Directory] = useState<string>()
+  const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>([])
+  const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
+  const [isScanningVst3, setIsScanningVst3] = useState(false)
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
 
@@ -111,6 +116,7 @@ export default function App() {
   const selectedClip = project?.clips.find((clip) => clip.id === selectedClipId)
   const activeAssetById = useMemo(() => new Map(project?.assets.map((asset) => [asset.id, asset]) ?? []), [project])
   const activeProjectId = project?.id
+  const desktopRuntime = isDesktopRuntime()
 
   useEffect(() => {
     void projectRepository.listProjects().then(setProjects).catch(() => setToast({ tone: 'error', text: 'Não foi possível abrir os projetos locais.' }))
@@ -127,6 +133,12 @@ export default function App() {
     }
     return () => window.removeEventListener(SERVICE_WORKER_UPDATE_EVENT, markUpdateReady)
   }, [])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    const directory = window.localStorage.getItem('vale-studio:vst3-directory')
+    if (directory) setVst3Directory(directory)
+  }, [desktopRuntime])
 
   useEffect(() => {
     if (!project) return
@@ -171,6 +183,31 @@ export default function App() {
 
   function updateTrack(id: string, change: (track: Track) => Track) {
     updateProject((current) => ({ ...current, tracks: current.tracks.map((track) => track.id === id ? change(track) : track) }))
+  }
+
+  async function scanVst3Plugins(directory: string) {
+    setIsScanningVst3(true)
+    try {
+      const result = await scanVst3Directory(directory)
+      setVst3Directory(directory)
+      window.localStorage.setItem('vale-studio:vst3-directory', directory)
+      setVst3Plugins(result.plugins)
+      setVst3ScanErrors(result.errors)
+      setToast({ tone: result.errors.length ? 'info' : 'success', text: `${result.plugins.length} efeito${result.plugins.length === 1 ? '' : 's'} VST3 encontrado${result.plugins.length === 1 ? '' : 's'} em scanner isolado.` })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível verificar os plug-ins VST3.' })
+    } finally {
+      setIsScanningVst3(false)
+    }
+  }
+
+  async function chooseAndScanVst3Directory() {
+    if (!desktopRuntime) {
+      setToast({ tone: 'info', text: 'VST3 requer o Vale Studio Desktop para Windows; a versão web continua usando efeitos nativos.' })
+      return
+    }
+    const directory = await chooseVst3Directory()
+    if (directory) await scanVst3Plugins(directory)
   }
 
   async function applyPendingUpdate() {
@@ -637,6 +674,7 @@ export default function App() {
 
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
+    {view === 'project' && <section className={`desktop-vst3-panel ${desktopRuntime ? 'desktop-ready' : ''}`}><div><span className="eyebrow">VST3 DESKTOP</span><h3>{desktopRuntime ? 'Catálogo de plug-ins VST3' : 'Plug-ins VST3 exigem o app Desktop'}</h3><p>{desktopRuntime ? 'Escolha uma pasta sua. A inspeção acontece em um processo nativo separado, com prazo de segurança; o app web não abre arquivos .vst3.' : 'No navegador, continue usando os efeitos nativos. O suporte VST3 aparece apenas no instalador Vale Studio para Windows.'}</p></div><div className="vst3-actions"><button className="button secondary" onClick={() => void chooseAndScanVst3Directory()} disabled={isScanningVst3}>{isScanningVst3 ? 'Verificando…' : desktopRuntime ? 'Escolher pasta VST3' : 'Como usar no Desktop'}</button>{desktopRuntime && vst3Directory && <button className="link-button" onClick={() => void scanVst3Plugins(vst3Directory)} disabled={isScanningVst3}>Verificar novamente</button>}</div>{vst3Directory && <small className="vst3-directory">Pasta escolhida: {vst3Directory}</small>}{vst3Plugins.length > 0 && <div className="vst3-plugin-list">{vst3Plugins.map((plugin) => <article key={`${plugin.bundlePath}:${plugin.classId}`}><span>VST3</span><div><strong>{plugin.name}</strong><small>{plugin.vendor || 'Fabricante não informado'} · {plugin.version || 'versão não informada'}</small></div><code>{plugin.classId}</code></article>)}</div>}{vst3ScanErrors.length > 0 && <details className="vst3-errors"><summary>{vst3ScanErrors.length} item{vst3ScanErrors.length === 1 ? '' : 's'} não pôde{vst3ScanErrors.length === 1 ? '' : 'ram'} ser inspecionado{vst3ScanErrors.length === 1 ? '' : 's'}</summary><ul>{vst3ScanErrors.slice(0, 8).map((error) => <li key={error}>{error}</li>)}</ul></details>}</section>}
     <nav className="bottom-nav" aria-label="Navegação do estúdio">{([{ id: 'tracks', label: 'Pistas', icon: '≋' }, { id: 'mixer', label: 'Mixer', icon: '▥' }, { id: 'effects', label: 'Efeitos', icon: '◌' }, { id: 'takes', label: 'Takes', icon: '◫' }, { id: 'project', label: 'Projeto', icon: '◇' }] as const).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</nav>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
     <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />

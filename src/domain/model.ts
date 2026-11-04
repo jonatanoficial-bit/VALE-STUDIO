@@ -14,6 +14,23 @@ export type EffectSettings = {
   delayTime: number
 }
 
+/**
+ * Persisted VST3 identity. Audio processing stays in the Desktop host; the
+ * project must retain this metadata even when a plug-in is not installed.
+ */
+export type Vst3Insert = {
+  id: string
+  format: 'vst3'
+  bundlePath: string
+  classId: string
+  name: string
+  vendor: string
+  version: string
+  bypass: boolean
+  parameterValues: Record<string, number>
+  stateBase64?: string
+}
+
 export type MediaAsset = {
   id: string
   name: string
@@ -63,6 +80,7 @@ export type Track = {
   armed: boolean
   monitorMode: MonitorMode
   effects: EffectSettings
+  vst3Inserts: Vst3Insert[]
   clipIds: string[]
   takeIds: string[]
 }
@@ -113,6 +131,7 @@ export function createTrack(name: string, color = '#20a7ff'): Track {
     armed: false,
     monitorMode: 'off',
     effects: { ...DEFAULT_EFFECTS },
+    vst3Inserts: [],
     clipIds: [],
     takeIds: [],
   }

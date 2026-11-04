@@ -7,6 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "desktop:doctor": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/desktop-doctor.ps1",
+    "desktop:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-desktop.ps1",
+    "desktop:dev": "pnpm desktop:prepare && pnpm dlx @tauri-apps/cli@^2 dev",
+    "desktop:build": "pnpm desktop:prepare && pnpm dlx @tauri-apps/cli@^2 build",
     "lint": "eslint . --max-warnings=0",
     "test": "node --test tests/**/*.test.mjs",
     "audit:audio": "node scripts/audio-contract-audit.mjs"

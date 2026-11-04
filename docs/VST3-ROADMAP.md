@@ -44,6 +44,10 @@ O host C++ usará o VST3 SDK oficial. A camada Tauri só oferece janela, instala
 | V3 — controles | UI genérica de parâmetros, presets e automação; editor nativo opcional em janela separada. | Fallback funciona quando o plug-in não possui editor ou não aceita a escala da janela. |
 | V4 — tempo real | Cadeia nativa de I/O, bypass sem glitch, compensação de latência e recuperação de crash. | Medição em hardware, teste de dropout e sessão longa antes de liberar beta. |
 
+## Estado do repositório
+
+O marco **V1 — desktop seguro** foi iniciado para Windows x64: `src-tauri/` contém o shell Tauri e sua bridge; `native/vst3-host/` contém o scanner C++ baseado nas classes de hosting do SDK. O scanner recebe uma única pasta escolhida pelo usuário, tem prazo de 25 segundos e roda fora do processo da interface. Ele lista classes de efeito e seus identificadores, mas ainda não insere nem processa o áudio da sessão. O modelo de projeto já preserva `Vst3Insert` (identidade, parâmetros, bypass e estado opaco) para que um insert ausente não faça uma sessão perder informações. As instruções de compilação estão em [DESKTOP-WINDOWS.md](DESKTOP-WINDOWS.md).
+
 ## Segurança, compatibilidade e licenças
 
 - O usuário instala e escolhe os próprios plug-ins; o Vale Studio não redistribui VST3 de terceiros.

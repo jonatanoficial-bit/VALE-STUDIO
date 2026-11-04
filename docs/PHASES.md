@@ -10,6 +10,10 @@ O plano respeita a ordem de risco da Bíblia Mestre: primeiro o áudio preservad
 | 4. Portabilidade e continuidade | Backup/restauração `.valestudio`, exports/stems validados, PWA offline/upgrade e limites de armazenamento. | Em andamento: backup local autocontido, restauração como cópia independente, stems WAV em ZIP e atualização PWA confirmada pelo usuário implementados; validação de arquivos/dispositivos e limites de armazenamento permanecem pendentes. |
 | 5. Aceite de release | Execução documentada de A01–A70, múltiplos navegadores/dispositivos, permissões, interrupções e auditoria de licenças. | Em andamento: refinamento visual/ergonômico único para mobile e desktop iniciado; QA de dispositivos, permissões e A01–A70 permanece pendente. É a única etapa que pode declarar RC. |
 
+## Extensão Desktop VST3 — Windows x64
+
+Em construção paralela, sem alterar o comportamento web: shell Tauri, bridge com comandos tipados e scanner C++ isolado para classes de efeito VST3 foram adicionados ao repositório. A geração do instalador ainda depende de Rust, CMake, Microsoft C++ Build Tools e do SDK VST3 no ambiente de compilação. O scan de catálogo não é ainda um insert/processamento VST3 no mixer; render offline, parâmetros, estado e tempo real continuam os próximos marcos do roadmap.
+
 ## Limite de cada etapa
 
 O journal reduz a janela de perda a um trecho ainda não confirmado pelo IndexedDB; ele não substitui os testes A53–A58 de queda, encerramento forçado, reinício e recuperação em hardware. Por isso a etapa 2 não declara A10–A15 ou A53–A58 como **PASS**.

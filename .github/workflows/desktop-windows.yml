@@ -1,0 +1,47 @@
+name: Build Vale Studio Desktop (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'native/vst3-host/**'
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/prepare-desktop.ps1'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/desktop-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build signed-free desktop package and VST3 host
+        run: pnpm desktop:build
+      - name: Upload Windows installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vale-studio-desktop-windows-x64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/**
+            src-tauri/target/release/bundle/msi/**

@@ -48,7 +48,12 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   })
   const hasInvalidTrackLinks = (project.tracks as unknown[]).some((track) => {
     const item = asRecord(track)
-    return !item || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))
+    const inserts = item?.vst3Inserts
+    const hasInvalidInsert = inserts !== undefined && (!Array.isArray(inserts) || inserts.some((insert) => {
+      const value = asRecord(insert)
+      return !value || typeof value.id !== 'string' || value.format !== 'vst3' || typeof value.bundlePath !== 'string' || typeof value.classId !== 'string' || typeof value.name !== 'string' || typeof value.vendor !== 'string' || typeof value.version !== 'string' || typeof value.bypass !== 'boolean' || !asRecord(value.parameterValues) || (value.stateBase64 !== undefined && typeof value.stateBase64 !== 'string')
+    }))
+    return !item || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || hasInvalidInsert || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))
   })
   if (projectAssetIds.size !== archiveAssetIds.size || [...projectAssetIds].some((id) => !archiveAssetIds.has(id)) || archive.assets.some((asset) => !asRecord(asset) || typeof asRecord(asset)?.id !== 'string' || typeof asRecord(asset)?.mimeType !== 'string' || typeof asRecord(asset)?.base64 !== 'string' || !projectAssetIds.has(asRecord(asset)?.id as string)) || hasInvalidClip || hasInvalidTake || hasInvalidTrackLinks) {
     throw new Error('O manifesto de áudios do backup está incompleto ou inválido.')

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+src-tauri/target/
+native/vst3-host/dist/
 .env
 .env.*
 work/
