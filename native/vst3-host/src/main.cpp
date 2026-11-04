@@ -1,7 +1,7 @@
 // Vale Studio VST3 host: a short-lived, isolated scanner. It never runs in the
 // Tauri/UI process, so an invalid plug-in cannot take down the project editor.
 #include "public.sdk/source/vst/hosting/module.h"
-#include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/ivstaudioprocessor.h"
 
 #include <filesystem>
 #include <iostream>
@@ -43,7 +43,7 @@ static void inspectModule(const fs::path& path, std::vector<PluginRecord>& plugi
     return;
   }
   for (const auto& info : module->getFactory().classInfos()) {
-    if (info.category() != Steinberg::Vst::kVstAudioEffectClass) continue;
+    if (info.category() != kVstAudioEffectClass) continue;
     plugins.push_back({
       path.string(),
       info.ID().toString(),
