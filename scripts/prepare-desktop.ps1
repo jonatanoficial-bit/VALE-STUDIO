@@ -22,12 +22,29 @@ if (-not (Test-Path (Join-Path $SdkRoot 'CMakeLists.txt'))) {
 
 $hostSource = Join-Path $root 'native\vst3-host'
 $hostBuild = Join-Path $root 'work\vst3-host-build'
-Write-Output 'Compilando o host VST3 isolado (Windows x64)...'
-cmake -S $hostSource -B $hostBuild -G 'Visual Studio 17 2022' -A x64 "-DVST3_SDK_ROOT=$SdkRoot"
-cmake --build $hostBuild --config Release --target vst3-host
+$cmakeHelp = (& cmake --help 2>&1 | Out-String)
+$generator = @('Visual Studio 18 2026', 'Visual Studio 17 2022') |
+  Where-Object { $cmakeHelp.Contains($_) } |
+  Select-Object -First 1
 
-$host = Join-Path $hostSource 'dist\vst3-host.exe'
-if (-not (Test-Path $host)) {
-  throw "A compilação terminou sem gerar $host."
+if (-not $generator) {
+  throw 'Nenhum gerador Visual Studio compatível foi encontrado pelo CMake. Instale o Visual Studio Build Tools com Desktop development with C++ e use CMake 3.25 ou superior.'
 }
-Write-Output "Host VST3 pronto: $host"
+
+Write-Output 'Compilando o host VST3 isolado (Windows x64)...'
+Write-Output "Gerador CMake: $generator"
+cmake -S $hostSource -B $hostBuild -G $generator -A x64 "-DVST3_SDK_ROOT=$SdkRoot"
+if ($LASTEXITCODE -ne 0) {
+  throw 'O CMake não conseguiu configurar o host VST3.'
+}
+
+cmake --build $hostBuild --config Release --target vst3-host
+if ($LASTEXITCODE -ne 0) {
+  throw 'O CMake não conseguiu compilar o host VST3.'
+}
+
+$hostBinary = Join-Path $hostSource 'dist\vst3-host.exe'
+if (-not (Test-Path $hostBinary)) {
+  throw "A compilação terminou sem gerar $hostBinary."
+}
+Write-Output "Host VST3 pronto: $hostBinary"

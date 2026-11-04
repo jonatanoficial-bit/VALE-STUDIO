@@ -15,7 +15,7 @@ O scan já é nativo e real; aplicar DSP VST3 na cadeia de reprodução/exporta�
 ## Ferramentas gratuitas necessárias
 
 1. **Rust stable** — instale por [rustup](https://rustup.rs/).
-2. **Visual Studio Build Tools 2022** com a carga de trabalho **Desktop development with C++**.
+2. **Visual Studio Build Tools** com a carga de trabalho **Desktop development with C++**. O script aceita os geradores Visual Studio 2022 e Visual Studio 2026 disponíveis no CMake.
 3. **CMake 3.25 ou mais recente**.
 4. Git, já usado pelo projeto.
 

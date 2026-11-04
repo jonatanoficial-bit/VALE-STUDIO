@@ -105,7 +105,10 @@ export default function App() {
   const [archiving, setArchiving] = useState<'export' | 'import'>()
   const [takeDrafts, setTakeDrafts] = useState<TakeDraft[]>([])
   const [updateReady, setUpdateReady] = useState(false)
-  const [vst3Directory, setVst3Directory] = useState<string>()
+  const [vst3Directory, setVst3Directory] = useState<string | undefined>(() => {
+    if (!isDesktopRuntime()) return undefined
+    return window.localStorage.getItem('vale-studio:vst3-directory') ?? undefined
+  })
   const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>([])
   const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
   const [isScanningVst3, setIsScanningVst3] = useState(false)
@@ -133,12 +136,6 @@ export default function App() {
     }
     return () => window.removeEventListener(SERVICE_WORKER_UPDATE_EVENT, markUpdateReady)
   }, [])
-
-  useEffect(() => {
-    if (!desktopRuntime) return
-    const directory = window.localStorage.getItem('vale-studio:vst3-directory')
-    if (directory) setVst3Directory(directory)
-  }, [desktopRuntime])
 
   useEffect(() => {
     if (!project) return
