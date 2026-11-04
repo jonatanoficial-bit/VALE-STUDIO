@@ -127,6 +127,7 @@ test('a edição Desktop mantém a web e escaneia VST3 fora do processo da inter
   assert.match(tauri, /probe_vst3/)
   assert.match(tauriConfig, /customprotocol: asset:/)
   assert.match(tauriConfig, /http:\/\/asset\.localhost/)
+  assert.match(tauriConfig, /script-src 'self' customprotocol: asset:/)
   assert.match(host, /VST3::Hosting::Module::create/)
   assert.match(host, /kVstAudioEffectClass/)
   assert.match(host, /setupProcessing/)
