@@ -40,6 +40,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 :root { color-scheme: dark; --surface-0: #020912; --surface-1: #071522; --surface-2: #0b1c2e; --line: #22425e; --muted: #8da9c1; --electric: #39c9ff; --touch: 46px; }
 html { min-width: 320px; background: var(--surface-0); }
 body { min-height: 100svh; }
+.startup-recovery { min-height: 100svh; display: grid; align-content: center; justify-items: start; gap: 13px; padding: clamp(28px, 8vw, 92px); color: #e3f6ff; background: radial-gradient(circle at 80% 15%, #0c85d63d, transparent 34%), #020912; }.startup-recovery > span { color: #51d1ff; font-size: 11px; font-weight: 800; letter-spacing: .22em; }.startup-recovery h1 { max-width: 440px; margin: 0; font-size: clamp(26px, 5vw, 45px); letter-spacing: -.05em; }.startup-recovery p { max-width: 460px; margin: 0; color: #9db9ce; font-size: 14px; line-height: 1.55; }
 button, input, select { -webkit-tap-highlight-color: transparent; }
 button { touch-action: manipulation; }
 @media (hover: hover) and (pointer: fine) { button:hover:not(:disabled) { filter: brightness(1.08); } }

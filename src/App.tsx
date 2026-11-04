@@ -44,6 +44,22 @@ function safeFilePart(value: string, fallback: string): string {
   return safe || fallback
 }
 
+function readStoredVst3Directory(): string | undefined {
+  try {
+    return window.localStorage.getItem('vale-studio:vst3-directory') ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function storeVst3Directory(directory: string): void {
+  try {
+    window.localStorage.setItem('vale-studio:vst3-directory', directory)
+  } catch {
+    // The desktop app remains usable when the embedded WebView blocks storage.
+  }
+}
+
 function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
   const points = peaks.map((peak, index) => {
     const x = peaks.length === 1 ? 50 : index / (peaks.length - 1) * 100
@@ -108,7 +124,7 @@ export default function App() {
   const [updateReady, setUpdateReady] = useState(false)
   const [vst3Directory, setVst3Directory] = useState<string | undefined>(() => {
     if (!isDesktopRuntime()) return undefined
-    return window.localStorage.getItem('vale-studio:vst3-directory') ?? undefined
+    return readStoredVst3Directory()
   })
   const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>([])
   const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
@@ -189,7 +205,7 @@ export default function App() {
     try {
       const result = await scanVst3Directory(directory)
       setVst3Directory(directory)
-      window.localStorage.setItem('vale-studio:vst3-directory', directory)
+      storeVst3Directory(directory)
       setVst3Plugins(result.plugins)
       setVst3ScanErrors(result.errors)
       setToast({ tone: result.errors.length ? 'info' : 'success', text: `${result.plugins.length} efeito${result.plugins.length === 1 ? '' : 's'} VST3 encontrado${result.plugins.length === 1 ? '' : 's'} em scanner isolado.` })

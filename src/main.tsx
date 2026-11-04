@@ -1,12 +1,27 @@
-import { StrictMode } from 'react'
+import { Component, StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import App from './App'
 import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
+type StartupBoundaryState = { failed: boolean }
+
+class StartupBoundary extends Component<{ children: ReactNode }, StartupBoundaryState> {
+  state: StartupBoundaryState = { failed: false }
+
+  static getDerivedStateFromError(): StartupBoundaryState {
+    return { failed: true }
+  }
+
+  render() {
+    if (this.state.failed) return <main className="startup-recovery"><span>VALE STUDIO</span><h1>Não foi possível iniciar a interface.</h1><p>Feche o aplicativo e abra-o novamente. Se continuar, instale a versão mais recente disponibilizada no projeto.</p></main>
+    return this.props.children
+  }
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <StartupBoundary><App /></StartupBoundary>
   </StrictMode>,
 )
 

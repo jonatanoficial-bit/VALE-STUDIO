@@ -115,6 +115,8 @@ test('a edição Desktop mantém a web e escaneia VST3 fora do processo da inter
   const archive = await read('src/storage/projectArchive.ts')
   assert.match(app, /Escolher pasta VST3/)
   assert.match(app, /scanVst3Directory/)
+  assert.match(app, /function readStoredVst3Directory/)
+  assert.match(app, /function storeVst3Directory/)
   assert.match(desktop, /window as TauriWindow/)
   assert.match(desktop, /scan_vst3/)
   assert.match(desktop, /probe_vst3/)
