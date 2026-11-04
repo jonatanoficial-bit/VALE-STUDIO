@@ -34,7 +34,7 @@
       "../native/vst3-host/dist/vst3-host.exe": "vst3-host.exe"
     },
     "windows": {
-      "nsis": { "installerMode": "currentUser" }
+      "nsis": { "installMode": "currentUser" }
     }
   }
 }
