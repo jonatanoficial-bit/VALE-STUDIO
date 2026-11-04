@@ -5,7 +5,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(25);
 
