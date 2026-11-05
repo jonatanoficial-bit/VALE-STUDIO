@@ -24,6 +24,7 @@ struct Vst3Plugin {
     name: String,
     vendor: String,
     version: String,
+    kind: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,6 +126,38 @@ fn scan_vst3(app: AppHandle, directory: String) -> Result<Vst3ScanResult, String
         .map_err(|_| "O scanner VST3 retornou uma resposta inválida.".into())
 }
 
+fn default_vst3_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        directories.push(PathBuf::from(&program_files).join("Common Files").join("VST3"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        directories.push(PathBuf::from(program_files_x86).join("Common Files").join("VST3"));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        directories.push(PathBuf::from(local_app_data).join("Programs").join("Common").join("VST3"));
+    }
+    directories.into_iter().filter(|directory| directory.is_dir()).collect()
+}
+
+#[tauri::command]
+fn scan_default_vst3(app: AppHandle) -> Result<Vst3ScanResult, String> {
+    let mut plugins = Vec::new();
+    let mut errors = Vec::new();
+    for directory in default_vst3_directories() {
+        match run_vst3_host(&app, &["--scan".into(), directory.to_string_lossy().into_owned()], "o scanner") {
+            Ok(output) => match serde_json::from_slice::<Vst3ScanResult>(&output) {
+                Ok(mut result) => { plugins.append(&mut result.plugins); errors.append(&mut result.errors); }
+                Err(_) => errors.push(format!("{}: resposta inválida do scanner.", directory.display())),
+            },
+            Err(error) => errors.push(format!("{}: {error}", directory.display())),
+        }
+    }
+    plugins.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    plugins.dedup_by(|left, right| left.bundle_path.eq_ignore_ascii_case(&right.bundle_path) && left.class_id == right.class_id);
+    Ok(Vst3ScanResult { plugins, errors })
+}
+
 #[tauri::command]
 fn probe_vst3(app: AppHandle, bundle_path: String, class_id: String) -> Result<Vst3ProbeResult, String> {
     let bundle_path = PathBuf::from(bundle_path)
@@ -143,7 +176,7 @@ fn probe_vst3(app: AppHandle, bundle_path: String, class_id: String) -> Result<V
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![desktop_runtime, pick_vst3_directory, scan_vst3, probe_vst3])
+        .invoke_handler(tauri::generate_handler![desktop_runtime, pick_vst3_directory, scan_vst3, scan_default_vst3, probe_vst3])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar Vale Studio Desktop");
 }

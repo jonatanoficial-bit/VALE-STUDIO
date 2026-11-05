@@ -26,9 +26,18 @@ export type Vst3Insert = {
   name: string
   vendor: string
   version: string
+  kind?: 'effect' | 'instrument'
   bypass: boolean
   parameterValues: Record<string, number>
   stateBase64?: string
+}
+
+export type MidiNote = {
+  id: string
+  note: number
+  velocity: number
+  startBeat: number
+  durationBeats: number
 }
 
 export type MediaAsset = {
@@ -81,6 +90,8 @@ export type Track = {
   monitorMode: MonitorMode
   effects: EffectSettings
   vst3Inserts: Vst3Insert[]
+  kind?: 'audio' | 'midi'
+  midiNotes?: MidiNote[]
   clipIds: string[]
   takeIds: string[]
 }
@@ -132,9 +143,15 @@ export function createTrack(name: string, color = '#20a7ff'): Track {
     monitorMode: 'off',
     effects: { ...DEFAULT_EFFECTS },
     vst3Inserts: [],
+    kind: 'audio',
+    midiNotes: [],
     clipIds: [],
     takeIds: [],
   }
+}
+
+export function createMidiTrack(name: string, color = '#a855f7'): Track {
+  return { ...createTrack(name, color), kind: 'midi', midiNotes: [] }
 }
 
 export function createProject(name: string, sampleRate = 48000): AudioProject {

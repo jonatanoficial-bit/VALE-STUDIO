@@ -4,6 +4,7 @@ export type Vst3Plugin = {
   name: string
   vendor: string
   version: string
+  kind: 'effect' | 'instrument'
 }
 
 export type Vst3ScanResult = {
@@ -44,7 +45,13 @@ export async function scanVst3Directory(directory: string): Promise<Vst3ScanResu
   return core.invoke<Vst3ScanResult>('scan_vst3', { directory })
 }
 
-export async function probeVst3Plugin(plugin: Vst3Plugin): Promise<Vst3ProbeResult> {
+export async function scanDefaultVst3Directories(): Promise<Vst3ScanResult> {
+  const core = nativeCore()
+  if (!core) throw new Error('A busca por VST3 está disponível apenas no Vale Studio Desktop.')
+  return core.invoke<Vst3ScanResult>('scan_default_vst3')
+}
+
+export async function probeVst3Plugin(plugin: Pick<Vst3Plugin, 'bundlePath' | 'classId'>): Promise<Vst3ProbeResult> {
   const core = nativeCore()
   if (!core) throw new Error('A qualificação VST3 está disponível apenas no Vale Studio Desktop.')
   return core.invoke<Vst3ProbeResult>('probe_vst3', { bundlePath: plugin.bundlePath, classId: plugin.classId })

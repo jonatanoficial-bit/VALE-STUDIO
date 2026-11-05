@@ -110,6 +110,7 @@ export class AudioEngine {
   private durableWrite: Promise<void> = Promise.resolve()
   private durableFailure?: string
   private persistRecordingChunk?: (chunk: RecordingPcmChunk) => Promise<void>
+  private midiVoices = new Map<number, { oscillator: OscillatorNode; gain: GainNode }>()
 
   async initFromUserGesture(): Promise<AudioCapabilities> {
     if (!this.context) {
@@ -140,6 +141,34 @@ export class AudioEngine {
 
   get isRecording(): boolean {
     return Boolean(this.recordingTrackId)
+  }
+
+  playMidiNote(note: number, velocity = 96): void {
+    if (!this.context || !this.master || this.midiVoices.has(note)) return
+    const oscillator = this.context.createOscillator()
+    const gain = this.context.createGain()
+    oscillator.type = 'sawtooth'
+    oscillator.frequency.value = 440 * Math.pow(2, (note - 69) / 12)
+    const level = Math.max(0.01, Math.min(1, velocity / 127)) * 0.12
+    gain.gain.setValueAtTime(0.0001, this.context.currentTime)
+    gain.gain.exponentialRampToValueAtTime(level, this.context.currentTime + 0.012)
+    oscillator.connect(gain)
+    gain.connect(this.master)
+    oscillator.start()
+    this.midiVoices.set(note, { oscillator, gain })
+  }
+
+  stopMidiNote(note: number): void {
+    const voice = this.midiVoices.get(note)
+    if (!voice || !this.context) return
+    voice.gain.gain.cancelScheduledValues(this.context.currentTime)
+    voice.gain.gain.setTargetAtTime(0.0001, this.context.currentTime, 0.025)
+    voice.oscillator.stop(this.context.currentTime + 0.12)
+    this.midiVoices.delete(note)
+  }
+
+  stopMidiNotes(): void {
+    ;[...this.midiVoices.keys()].forEach((note) => this.stopMidiNote(note))
   }
 
   async decodeAsset(id: string, blob: Blob): Promise<AudioBuffer> {

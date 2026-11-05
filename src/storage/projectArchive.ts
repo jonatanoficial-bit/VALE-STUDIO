@@ -54,7 +54,12 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
       const parameterValues = asRecord(value?.parameterValues)
       return !value || typeof value.id !== 'string' || value.format !== 'vst3' || typeof value.bundlePath !== 'string' || typeof value.classId !== 'string' || typeof value.name !== 'string' || typeof value.vendor !== 'string' || typeof value.version !== 'string' || typeof value.bypass !== 'boolean' || !parameterValues || Object.values(parameterValues).some((parameter) => typeof parameter !== 'number' || !Number.isFinite(parameter)) || (value.stateBase64 !== undefined && typeof value.stateBase64 !== 'string')
     }))
-    return !item || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || hasInvalidInsert || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))
+    const midiNotes = item?.midiNotes
+    const hasInvalidMidi = midiNotes !== undefined && (!Array.isArray(midiNotes) || midiNotes.some((note) => {
+      const value = asRecord(note)
+      return !value || typeof value.id !== 'string' || typeof value.note !== 'number' || !Number.isInteger(value.note) || value.note < 0 || value.note > 127 || typeof value.velocity !== 'number' || !Number.isInteger(value.velocity) || value.velocity < 0 || value.velocity > 127 || typeof value.startBeat !== 'number' || !Number.isFinite(value.startBeat) || typeof value.durationBeats !== 'number' || !Number.isFinite(value.durationBeats) || value.durationBeats <= 0
+    }))
+    return !item || (item.kind !== undefined && item.kind !== 'audio' && item.kind !== 'midi') || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || hasInvalidInsert || hasInvalidMidi || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))
   })
   if (projectAssetIds.size !== archiveAssetIds.size || [...projectAssetIds].some((id) => !archiveAssetIds.has(id)) || archive.assets.some((asset) => !asRecord(asset) || typeof asRecord(asset)?.id !== 'string' || typeof asRecord(asset)?.mimeType !== 'string' || typeof asRecord(asset)?.base64 !== 'string' || !projectAssetIds.has(asRecord(asset)?.id as string)) || hasInvalidClip || hasInvalidTake || hasInvalidTrackLinks) {
     throw new Error('O manifesto de áudios do backup está incompleto ou inválido.')

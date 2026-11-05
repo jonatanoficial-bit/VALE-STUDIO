@@ -6,6 +6,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -19,6 +20,7 @@ struct PluginRecord {
   std::string name;
   std::string vendor;
   std::string version;
+  std::string kind;
 };
 
 struct ProbeResult {
@@ -74,12 +76,19 @@ static void inspectModule(const fs::path& path, std::vector<PluginRecord>& plugi
   }
   for (const auto& info : module->getFactory().classInfos()) {
     if (info.category() != kVstAudioEffectClass) continue;
+    const auto subCategories = info.subCategoriesString();
+    const auto lowerSubCategories = [&] {
+      std::string value = subCategories;
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+      return value;
+    }();
     plugins.push_back({
       path.string(),
       info.ID().toString(),
       info.name(),
       info.vendor(),
       info.version(),
+      lowerSubCategories.find("instrument") != std::string::npos ? "instrument" : "effect",
     });
   }
 }
@@ -93,7 +102,8 @@ static void writeJson(const std::vector<PluginRecord>& plugins, const std::vecto
               << "\",\"classId\":\"" << escapeJson(plugin.classId)
               << "\",\"name\":\"" << escapeJson(plugin.name)
               << "\",\"vendor\":\"" << escapeJson(plugin.vendor)
-              << "\",\"version\":\"" << escapeJson(plugin.version) << "\"}";
+              << "\",\"version\":\"" << escapeJson(plugin.version)
+              << "\",\"kind\":\"" << plugin.kind << "\"}";
   }
   std::cout << "],\"errors\":[";
   for (size_t index = 0; index < errors.size(); ++index) {

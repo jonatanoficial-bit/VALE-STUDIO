@@ -3,11 +3,12 @@ import { AudioEngine, type AudioCapabilities } from './audio/AudioEngine'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
-import type { AudioProject, Clip, MediaAsset, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
-import { createProject, createTrack, gainToDb } from './domain/model'
+import type { AudioProject, Clip, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
+import { createMidiTrack, createProject, createTrack, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
-import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
+import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanDefaultVst3Directories, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
+import { MidiInput, type MidiDevice, type MidiMessage } from './midi/MidiInput'
 import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
@@ -60,6 +61,12 @@ function storeVst3Directory(directory: string): void {
   }
 }
 
+function mergeVst3Plugins(current: Vst3Plugin[], incoming: Vst3Plugin[]): Vst3Plugin[] {
+  const byId = new Map(current.map((plugin) => [`${plugin.bundlePath}:${plugin.classId}`, plugin]))
+  incoming.forEach((plugin) => byId.set(`${plugin.bundlePath}:${plugin.classId}`, plugin))
+  return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
+}
+
 function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
   const points = peaks.map((peak, index) => {
     const x = peaks.length === 1 ? 50 : index / (peaks.length - 1) * 100
@@ -71,6 +78,13 @@ function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
       <polyline points={points} stroke={color} strokeWidth="0.85" fill="none" strokeLinecap="round" />
     </svg>
   )
+}
+
+function MidiRoll({ notes, color }: { notes: MidiNote[]; color: string }) {
+  return <div className="midi-roll" aria-label={`${notes.length} nota${notes.length === 1 ? '' : 's'} MIDI gravada${notes.length === 1 ? '' : 's'}`}>
+    {notes.map((note) => <span key={note.id} style={{ left: `${Math.max(0, Math.min(96, note.startBeat / 16 * 100))}%`, width: `${Math.max(2, Math.min(32, note.durationBeats / 16 * 100))}%`, top: `${Math.max(5, Math.min(75, (108 - note.note) / 60 * 100))}%`, background: color }} title={`MIDI ${note.note} · velocidade ${note.velocity}`} />)}
+    {notes.length === 0 && <small>Arme e grave para desenhar notas MIDI aqui</small>}
+  </div>
 }
 
 function Logo() {
@@ -99,6 +113,11 @@ function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm
 
 export default function App() {
   const engineRef = useRef(new AudioEngine())
+  const midiRef = useRef(new MidiInput())
+  const projectRef = useRef<AudioProject | undefined>(undefined)
+  const selectedTrackIdRef = useRef<string | undefined>(undefined)
+  const recordingRef = useRef(false)
+  const activeMidiNotesRef = useRef(new Map<number, Omit<MidiNote, 'durationBeats'>>())
   const activeDraftRef = useRef<{ id: string; projectId: string; trackId: string } | undefined>(undefined)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const archiveInputRef = useRef<HTMLInputElement>(null)
@@ -114,6 +133,7 @@ export default function App() {
   const [isMetronome, setIsMetronome] = useState(false)
   const [playhead, setPlayhead] = useState(0)
   const [inputPeak, setInputPeak] = useState<number>()
+  const [recordingPeaks, setRecordingPeaks] = useState<number[]>([])
   const [trackPeaks, setTrackPeaks] = useState<Record<string, number>>({})
   const [toast, setToast] = useState<Toast>()
   const [showNewProject, setShowNewProject] = useState(false)
@@ -130,6 +150,10 @@ export default function App() {
   const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
   const [isScanningVst3, setIsScanningVst3] = useState(false)
   const [vst3ProbeStates, setVst3ProbeStates] = useState<Record<string, Vst3ProbeState>>({})
+  const [midiDevices, setMidiDevices] = useState<MidiDevice[]>([])
+  const [midiInputId, setMidiInputId] = useState<string>()
+  const [midiReady, setMidiReady] = useState(false)
+  const [draggedTrackId, setDraggedTrackId] = useState<string>()
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
 
@@ -139,10 +163,26 @@ export default function App() {
   const activeProjectId = project?.id
   const desktopRuntime = isDesktopRuntime()
 
+  useEffect(() => { projectRef.current = project }, [project])
+  useEffect(() => { selectedTrackIdRef.current = selectedTrackId }, [selectedTrackId])
+  useEffect(() => { recordingRef.current = isRecording }, [isRecording])
+  useEffect(() => () => { midiRef.current.disconnect(); engineRef.current.stopMidiNotes() }, [])
+
   useEffect(() => {
     void projectRepository.listProjects().then(setProjects).catch(() => setToast({ tone: 'error', text: 'Não foi possível abrir os projetos locais.' }))
     void projectRepository.getStorageEstimate().then(setStorage)
   }, [])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    void Promise.all([scanDefaultVst3Directories(), ...(vst3Directory ? [scanVst3Directory(vst3Directory)] : [])]).then((results) => {
+      const plugins = results.flatMap((result) => result.plugins)
+      const errors = results.flatMap((result) => result.errors)
+      setVst3Plugins((current) => mergeVst3Plugins(current, plugins))
+      setVst3ScanErrors(errors)
+      if (plugins.length) setToast({ tone: 'success', text: `${plugins.length} plug-ins VST3 encontrados automaticamente.` })
+    }).catch(() => undefined)
+  }, [desktopRuntime])
 
   useEffect(() => {
     const markUpdateReady = () => setUpdateReady(true)
@@ -173,6 +213,9 @@ export default function App() {
       if (!project) return
       setPlayhead(engineRef.current.getCurrentFrame(project.audioSampleRate))
       setInputPeak(engineRef.current.getInputMeter()?.peak)
+      if (isRecording && selectedTrack?.kind !== 'midi') {
+        setRecordingPeaks((peaks) => [...peaks.slice(-119), Math.max(0.02, engineRef.current.getInputMeter()?.peak ?? 0.02)])
+      }
       const next: Record<string, number> = {}
       project.tracks.forEach((track) => {
         const value = engineRef.current.getTrackMeter(track.id)?.peak
@@ -181,7 +224,7 @@ export default function App() {
       setTrackPeaks(next)
     }, 80)
     return () => window.clearInterval(timer)
-  }, [project])
+  }, [project, isRecording, selectedTrack?.kind])
 
   function updateProject(change: (current: AudioProject) => AudioProject, recordHistory = true) {
     setProject((current) => {
@@ -206,9 +249,9 @@ export default function App() {
       const result = await scanVst3Directory(directory)
       setVst3Directory(directory)
       storeVst3Directory(directory)
-      setVst3Plugins(result.plugins)
+      setVst3Plugins((current) => mergeVst3Plugins(current, result.plugins))
       setVst3ScanErrors(result.errors)
-      setToast({ tone: result.errors.length ? 'info' : 'success', text: `${result.plugins.length} efeito${result.plugins.length === 1 ? '' : 's'} VST3 encontrado${result.plugins.length === 1 ? '' : 's'} em scanner isolado.` })
+      setToast({ tone: result.errors.length ? 'info' : 'success', text: `${result.plugins.length} plug-in${result.plugins.length === 1 ? '' : 's'} VST3 encontrado${result.plugins.length === 1 ? '' : 's'} em scanner isolado.` })
     } catch (error) {
       setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível verificar os plug-ins VST3.' })
     } finally {
@@ -242,11 +285,12 @@ export default function App() {
       name: plugin.name,
       vendor: plugin.vendor,
       version: plugin.version,
+      kind: plugin.kind,
       bypass: true,
       parameterValues: {},
     }
     updateTrack(selectedTrack.id, (track) => ({ ...track, vst3Inserts: [...track.vst3Inserts, insert] }))
-    setToast({ tone: 'success', text: `${plugin.name} foi salvo em bypass na cadeia de ${selectedTrack.name}.` })
+    setToast({ tone: 'success', text: `${plugin.name} foi preparado em bypass na cadeia de ${selectedTrack.name}.` })
     void probeVst3Insert(insert)
   }
 
@@ -444,6 +488,78 @@ export default function App() {
     setSelectedTrackId(track.id)
   }
 
+  function addMidiTrack() {
+    if (!project) return
+    const track = createMidiTrack(`Instrumento MIDI ${project.tracks.filter((item) => item.kind === 'midi').length + 1}`, TRACK_COLORS[project.tracks.length % TRACK_COLORS.length])
+    updateProject((current) => ({ ...current, tracks: [...current.tracks, track] }))
+    setSelectedTrackId(track.id)
+    setToast({ tone: 'info', text: 'Pista MIDI criada. Conecte uma entrada MIDI e arme a pista para gravar notas.' })
+  }
+
+  function reorderTracks(sourceId: string, targetId: string) {
+    if (sourceId === targetId) return
+    updateProject((current) => {
+      const sourceIndex = current.tracks.findIndex((track) => track.id === sourceId)
+      const targetIndex = current.tracks.findIndex((track) => track.id === targetId)
+      if (sourceIndex < 0 || targetIndex < 0) return current
+      const tracks = [...current.tracks]
+      const [source] = tracks.splice(sourceIndex, 1)
+      tracks.splice(targetIndex, 0, source)
+      return { ...current, tracks }
+    })
+  }
+
+  function currentBeat(current: AudioProject): number {
+    return engineRef.current.getCurrentFrame(current.audioSampleRate) / current.audioSampleRate * current.bpm / 60
+  }
+
+  function onMidiMessage(message: MidiMessage) {
+    const current = projectRef.current
+    const trackId = selectedTrackIdRef.current
+    const track = current?.tracks.find((item) => item.id === trackId)
+    if (!current || !track || track.kind !== 'midi') return
+    if (message.type === 'noteon') {
+      engineRef.current.playMidiNote(message.note, message.velocity)
+      if (recordingRef.current && track.armed) {
+        activeMidiNotesRef.current.set(message.note, { id: makeId(), note: message.note, velocity: message.velocity, startBeat: currentBeat(current) })
+      }
+      return
+    }
+    engineRef.current.stopMidiNote(message.note)
+    const started = activeMidiNotesRef.current.get(message.note)
+    if (!started) return
+    activeMidiNotesRef.current.delete(message.note)
+    const note: MidiNote = { ...started, durationBeats: Math.max(0.0625, currentBeat(current) - started.startBeat) }
+    setProject((active) => !active ? active : { ...active, updatedAt: new Date().toISOString(), tracks: active.tracks.map((item) => item.id === track.id ? { ...item, midiNotes: [...(item.midiNotes ?? []), note] } : item) })
+  }
+
+  async function enableMidiInput() {
+    const audio = capabilities ?? await activateAudio()
+    if (!audio) return
+    try {
+      const devices = await midiRef.current.connect(midiInputId, onMidiMessage, setMidiDevices)
+      const selected = devices.find((item) => item.id === midiInputId) ?? devices[0]
+      setMidiInputId(selected?.id)
+      setMidiReady(true)
+      setToast({ tone: 'success', text: `${selected?.name ?? 'Entrada MIDI'} pronta. Toque uma nota para pré-ouvir ou grave na pista MIDI armada.` })
+    } catch (error) {
+      setMidiReady(false)
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível abrir a entrada MIDI.' })
+    }
+  }
+
+  function finishMidiNotes() {
+    const current = projectRef.current
+    const trackId = selectedTrackIdRef.current
+    if (!current || !trackId) return
+    const unfinished = [...activeMidiNotesRef.current.values()]
+    activeMidiNotesRef.current.clear()
+    engineRef.current.stopMidiNotes()
+    if (!unfinished.length) return
+    const endBeat = currentBeat(current)
+    setProject((active) => !active ? active : { ...active, updatedAt: new Date().toISOString(), tracks: active.tracks.map((track) => track.id === trackId ? { ...track, midiNotes: [...(track.midiNotes ?? []), ...unfinished.map((note) => ({ ...note, durationBeats: Math.max(0.0625, endBeat - note.startBeat) }))] } : track) })
+  }
+
   function togglePlayback() {
     if (!project) return
     if (!capabilities) { void activateAudio(); return }
@@ -469,6 +585,20 @@ export default function App() {
 
   async function toggleRecording() {
     if (!project || !selectedTrack) return
+    if (selectedTrack.kind === 'midi') {
+      if (isRecording) {
+        finishMidiNotes()
+        setIsRecording(false)
+        setToast({ tone: 'success', text: 'Gravação MIDI concluída. As notas ficaram salvas nesta pista.' })
+        return
+      }
+      if (!selectedTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista MIDI antes de tocar em REC.' }); return }
+      if (!midiReady) { await enableMidiInput(); return }
+      if (!isPlaying) { engineRef.current.play(project); setIsPlaying(true) }
+      setIsRecording(true)
+      setToast({ tone: 'info', text: 'Gravando MIDI. Toque no controlador; as notas aparecem na pista.' })
+      return
+    }
     if (isRecording) {
       const captured = await engineRef.current.stopRecording()
       setIsRecording(false)
@@ -526,6 +656,7 @@ export default function App() {
         await projectRepository.appendTakeDraftChunk({ ...chunk, draftId })
       })
       await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
+      setRecordingPeaks([])
       setIsRecording(true)
       const agc = recording.inputSettings?.autoGainControl
       setToast({ tone: 'info', text: agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
@@ -725,8 +856,8 @@ export default function App() {
     <section className="session-meta"><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.max(40, current.bpm - 1) }))}>−</button><strong>{project.bpm} BPM</strong><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.min(240, current.bpm + 1) }))}>＋</button><span className="meta-divider" /><span>{project.timeSignature}</span><span className={`sync-badge ${project.calibrationFrames ? 'calibrated' : ''}`}>{project.calibrationFrames ? `Ajuste ${project.calibrationFrames} fr` : 'Sem calibração'}</span></section>
 
     {view === 'tracks' && <section className="track-area"><div className="ruler"><span>00:00</span><span>00:15</span><span>00:30</span><span>00:45</span><span>01:00</span></div><div className="playhead" style={{ left: `${Math.min(96, 18 + playhead / Math.max(project.audioSampleRate * 70, 1) * 78)}%` }} />
-      {project.tracks.map((track) => <article className={`track-row ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><div className="track-head"><span className="track-color" style={{ background: track.color }} /><div><strong>{track.name}</strong><small>{track.armed ? 'ARMADA' : track.monitorMode === 'software' ? 'MONITOR SOFTWARE' : 'Entrada mono'}</small></div><TrackMeter value={track.id === selectedTrack?.id && isRecording ? inputPeak : trackPeaks[track.id]} /><div className="track-toggles"><Toggle pressed={track.armed} label="ARM" danger onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} /><Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} /><Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} /><button className="tiny-toggle" onClick={() => cycleMonitor(track)}>MON</button></div></div><div className="clip-lane">{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = activeAssetById.get(clip.assetId); const left = 3 + clip.timelineStartFrame / project.audioSampleRate / 70 * 94; const width = Math.max(12, clip.durationFrames / project.audioSampleRate / 70 * 94); return <button key={clip.id} className={`audio-clip ${selectedClipId === clip.id ? 'selected' : ''}`} style={{ left: `${Math.min(94, left)}%`, width: `${Math.min(94 - left, width)}%`, '--clip-color': track.color } as React.CSSProperties} onClick={(event) => { event.stopPropagation(); setSelectedTrackId(track.id); setSelectedClipId(clip.id) }} aria-label={`Selecionar clipe ${asset?.name ?? 'gravado'}`}><Waveform peaks={asset?.peaks ?? [0]} color={track.color} /><small>{asset?.name.replace(/\.[^.]+$/, '')}</small></button> })}</div></article>)}
-      <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Pista</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
+      {project.tracks.map((track) => <article className={`track-row ${selectedTrack?.id === track.id ? 'selected' : ''} ${draggedTrackId === track.id ? 'dragging' : ''}`} key={track.id} draggable onDragStart={() => setDraggedTrackId(track.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggedTrackId) reorderTracks(draggedTrackId, track.id); setDraggedTrackId(undefined) }} onDragEnd={() => setDraggedTrackId(undefined)} onClick={() => setSelectedTrackId(track.id)}><div className="track-head"><span className="track-color" style={{ background: track.color }} /><div><strong>{track.name}</strong><small>{track.kind === 'midi' ? `${track.armed ? 'ARMADA · ' : ''}MIDI / INSTRUMENTO` : track.armed ? 'ARMADA' : track.monitorMode === 'software' ? 'MONITOR SOFTWARE' : 'Entrada mono'}</small></div><TrackMeter value={track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' ? inputPeak : trackPeaks[track.id]} /><div className="track-toggles"><Toggle pressed={track.armed} label="ARM" danger onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} /><Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} /><Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} />{track.kind !== 'midi' && <button className="tiny-toggle" onClick={() => cycleMonitor(track)}>MON</button>}</div></div><div className="clip-lane">{track.kind === 'midi' && <MidiRoll notes={track.midiNotes ?? []} color={track.color} />}{track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' && <div className="audio-clip live-wave" style={{ '--clip-color': track.color } as React.CSSProperties}><Waveform peaks={recordingPeaks.length ? recordingPeaks : [0]} color={track.color} /><small>Capturando ao vivo</small></div>}{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = activeAssetById.get(clip.assetId); const left = 3 + clip.timelineStartFrame / project.audioSampleRate / 70 * 94; const width = Math.max(12, clip.durationFrames / project.audioSampleRate / 70 * 94); return <button key={clip.id} className={`audio-clip ${selectedClipId === clip.id ? 'selected' : ''}`} style={{ left: `${Math.min(94, left)}%`, width: `${Math.min(94 - left, width)}%`, '--clip-color': track.color } as React.CSSProperties} onClick={(event) => { event.stopPropagation(); setSelectedTrackId(track.id); setSelectedClipId(clip.id) }} aria-label={`Selecionar clipe ${asset?.name ?? 'gravado'}`}><Waveform peaks={asset?.peaks ?? [0]} color={track.color} /><small>{asset?.name.replace(/\.[^.]+$/, '')}</small></button> })}</div></article>)}
+      <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
       {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button><button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
 
     {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><span className="eyebrow">MIXER</span><h2>Controle real por pista.</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><TrackMeter value={trackPeaks[track.id]} /><input aria-label={`Volume de ${track.name}`} className="fader" type="range" min="-60" max="6" step="0.5" value={track.gainDb} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, gainDb: Number(event.target.value) }))} /><output>{dbLabel(track.gainDb)}</output><label>Pan<input type="range" min="-1" max="1" step="0.05" value={track.pan} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, pan: Number(event.target.value) }))} /></label><div><Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} /><Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} /></div></article>)}</div></section>}
@@ -738,6 +869,8 @@ export default function App() {
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
     {view === 'effects' && selectedTrack && <Vst3InsertRack track={selectedTrack} desktopRuntime={desktopRuntime} probeStates={vst3ProbeStates} onProbe={probeVst3Insert} onToggle={toggleVst3Insert} onRemove={removeVst3Insert} />}
+
+    {view === 'project' && <section className="midi-panel"><div><span className="eyebrow">MIDI EXTERNO</span><h3>{selectedTrack?.kind === 'midi' ? `Entrada para ${selectedTrack.name}` : 'Selecione uma pista MIDI'}</h3><p>Conecte um teclado/controlador. As notas podem ser pré-ouvidas pelo sintetizador local e gravadas na pista MIDI armada. Instrumentos VST3 serão roteados por este mesmo fluxo quando o host DSP nativo estiver concluído.</p></div><div className="midi-controls"><select aria-label="Entrada MIDI" value={midiInputId ?? ''} onChange={(event) => setMidiInputId(event.target.value || undefined)}><option value="">{midiDevices.length ? 'Escolha a entrada MIDI' : 'Nenhuma entrada detectada ainda'}</option>{midiDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select><button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'Atualizar MIDI' : 'Conectar MIDI'}</button><small>{midiReady ? 'Entrada pronta. Para gravar, selecione e arme uma pista MIDI, depois use REC.' : 'O dispositivo só é acessado depois do seu toque em Conectar MIDI.'}</small></div></section>}
 
     {view === 'project' && desktopRuntime && vst3Plugins.length > 0 && <Vst3CatalogInsert plugins={vst3Plugins} track={selectedTrack} onInsert={addVst3Insert} />}
 

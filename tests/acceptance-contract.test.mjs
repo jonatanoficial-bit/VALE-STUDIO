@@ -147,6 +147,28 @@ test('o catálogo VST3 cria uma cadeia persistente sem alegar processamento web'
   assert.match(roadmap, /ainda não processa nem exibe o editor gráfico/)
 })
 
+test('a sessão registra MIDI externo, notas visuais e descoberta automática VST3', async () => {
+  const app = await read('src/App.tsx')
+  const engine = await read('src/audio/AudioEngine.ts')
+  const midi = await read('src/midi/MidiInput.ts')
+  const model = await read('src/domain/model.ts')
+  const tauri = await read('src-tauri/src/lib.rs')
+  const host = await read('native/vst3-host/src/main.cpp')
+  const archive = await read('src/storage/projectArchive.ts')
+  assert.match(app, /function addMidiTrack/)
+  assert.match(app, /function reorderTracks/)
+  assert.match(app, /function onMidiMessage/)
+  assert.match(app, /scanDefaultVst3Directories/)
+  assert.match(app, /Capturando ao vivo/)
+  assert.match(engine, /playMidiNote/)
+  assert.match(midi, /requestMIDIAccess/)
+  assert.match(model, /type MidiNote/)
+  assert.match(tauri, /scan_default_vst3/)
+  assert.match(tauri, /Common Files/)
+  assert.match(host, /subCategoriesString/)
+  assert.match(archive, /hasInvalidMidi/)
+})
+
 test('a mesma interface prioriza toque no mobile e densidade útil no desktop', async () => {
   const app = await read('src/App.tsx')
   const styles = await read('src/styles.css')
