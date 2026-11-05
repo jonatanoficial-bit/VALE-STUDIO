@@ -182,7 +182,7 @@ export default function App() {
       setVst3ScanErrors(errors)
       if (plugins.length) setToast({ tone: 'success', text: `${plugins.length} plug-ins VST3 encontrados automaticamente.` })
     }).catch(() => undefined)
-  }, [desktopRuntime])
+  }, [desktopRuntime, vst3Directory])
 
   useEffect(() => {
     const markUpdateReady = () => setUpdateReady(true)
