@@ -2,7 +2,7 @@ import { Component, StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import App from './App'
-import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
+import { PWA_SERVICE_WORKER_AVAILABLE, SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type StartupBoundaryState = { failed: boolean }
 
@@ -25,7 +25,7 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 )
 
-if ('serviceWorker' in navigator) {
+if (PWA_SERVICE_WORKER_AVAILABLE) {
   window.addEventListener('load', () => {
     const announceUpdate = () => window.dispatchEvent(new Event(SERVICE_WORKER_UPDATE_EVENT))
     navigator.serviceWorker.addEventListener('controllerchange', () => {

@@ -9,7 +9,7 @@ import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, 
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
 import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanDefaultVst3Directories, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
 import { MidiInput, type MidiDevice, type MidiMessage } from './midi/MidiInput'
-import { SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
+import { PWA_SERVICE_WORKER_AVAILABLE, SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
 type Toast = { tone: 'info' | 'error' | 'success'; text: string } | undefined
@@ -187,7 +187,7 @@ export default function App() {
   useEffect(() => {
     const markUpdateReady = () => setUpdateReady(true)
     window.addEventListener(SERVICE_WORKER_UPDATE_EVENT, markUpdateReady)
-    if ('serviceWorker' in navigator) {
+    if (PWA_SERVICE_WORKER_AVAILABLE) {
       void navigator.serviceWorker.getRegistration().then((registration) => {
         if (registration?.waiting) markUpdateReady()
       })

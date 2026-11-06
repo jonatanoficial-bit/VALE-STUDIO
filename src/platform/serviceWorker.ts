@@ -6,3 +6,11 @@ export const SERVICE_WORKER_UPDATE_EVENT = 'vale-studio:update-ready'
  * distinguish that case from the first service-worker installation.
  */
 export const SERVICE_WORKER_RELOAD_KEY = 'vale-studio:reload-after-update'
+
+/** Tauri uses WebView2 with an http-like internal origin. It must never run
+ * the browser PWA service worker because the bundled application is already
+ * local and an old cache can intercept its first page. */
+export const PWA_SERVICE_WORKER_AVAILABLE = typeof window !== 'undefined'
+  && 'serviceWorker' in navigator
+  && !Boolean((window as Window & { __TAURI__?: unknown }).__TAURI__)
+  && window.location.hostname !== 'tauri.localhost'

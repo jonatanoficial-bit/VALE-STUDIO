@@ -105,6 +105,14 @@ test('a atualização PWA espera confirmação e nunca assume durante uma grava�
   assert.match(app, /Salvar e atualizar/)
 })
 
+test('o service worker PWA não intercepta o aplicativo Tauri Desktop', async () => {
+  const main = await read('src/main.tsx')
+  const serviceWorker = await read('src/platform/serviceWorker.ts')
+  assert.match(main, /PWA_SERVICE_WORKER_AVAILABLE/)
+  assert.match(serviceWorker, /__TAURI__/)
+  assert.match(serviceWorker, /tauri\.localhost/)
+})
+
 test('a edição Desktop mantém a web e escaneia VST3 fora do processo da interface', async () => {
   const app = await read('src/App.tsx')
   const desktop = await read('src/platform/desktop.ts')
