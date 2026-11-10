@@ -1,10 +1,12 @@
 import { spawn, execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
-const [bundle, expectedKind] = process.argv.slice(2)
+const [bundle, expectedKind, ...options] = process.argv.slice(2)
 assert.ok(bundle && ['effect', 'instrument'].includes(expectedKind),
-  'Uso: node scripts/check-vst-stream.mjs <módulo.vst3> <effect|instrument>')
+  'Uso: node scripts/check-vst-stream.mjs <módulo.vst3> <effect|instrument> [--realtime]')
+const realtime = options.includes('--realtime')
 const executable = resolve('native/vst3-host/dist/vst3-host.exe')
 const catalog = JSON.parse(execFileSync(executable, ['--scan', bundle], { timeout: 15_000, encoding: 'utf8' }))
 const plugin = catalog.plugins.find((item) => item.kind === expectedKind)
@@ -34,7 +36,8 @@ try {
   let peak = 0
   let delta = 0
   for (let block = 0; block < 72; block += 1) {
-    const event = expectedKind === 'instrument' && (block === 0 || block === 48)
+    const onBlock = realtime ? 24 : 0
+    const event = expectedKind === 'instrument' && (block === onBlock || block === 60)
     const request = Buffer.alloc(frames * 8 + 4 + (event ? 16 : 0))
     if (expectedKind === 'effect') {
       for (let i = 0; i < frames * 2; i += 1) {
@@ -44,7 +47,7 @@ try {
     request.writeUInt32LE(event ? 1 : 0, frames * 8)
     if (event) {
       request.writeUInt32LE(60, frames * 8 + 8)
-      request.writeUInt32LE(block === 0 ? 112 : 0, frames * 8 + 12)
+      request.writeUInt32LE(block === onBlock ? 112 : 0, frames * 8 + 12)
     }
     child.stdin.write(request)
     const reply = await read(frames * 8)
@@ -54,6 +57,7 @@ try {
       peak = Math.max(peak, Math.abs(value))
       delta = Math.max(delta, Math.abs(value - request.readFloatLE(i * 4)))
     }
+    if (realtime) await delay(Math.round(frames / rate * 1000))
   }
   assert.ok(peak > 0.0001, 'A saída permaneceu silenciosa.')
   console.log(JSON.stringify({ plugin: plugin.name, peak, delta, blocks: 72 }))
