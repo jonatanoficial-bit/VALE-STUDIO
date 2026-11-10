@@ -1,11 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager};
+mod vst_stream;
 
 const VST3_HOST_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -83,7 +87,10 @@ fn pick_vst3_directory() -> Option<String> {
 }
 
 fn run_vst3_host(app: &AppHandle, arguments: &[String], operation: &str) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(host_binary(app)?)
+    let mut command = Command::new(host_binary(app)?);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let mut child = command
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -112,8 +119,72 @@ fn run_vst3_host(app: &AppHandle, arguments: &[String], operation: &str) -> Resu
     Ok(output.stdout)
 }
 
+fn scan_vst3_directories(app: &AppHandle, mut directories: Vec<PathBuf>) -> Vst3ScanResult {
+    let mut result = Vst3ScanResult { plugins: Vec::new(), errors: Vec::new() };
+    let mut modules = Vec::new();
+    while let Some(directory) = directories.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                result.errors.push(format!("{}: {error}", directory.display()));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    result.errors.push(format!("{}: {error}", directory.display()));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("vst3")) {
+                modules.push(path);
+            } else if entry.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink()) {
+                directories.push(path);
+            }
+        }
+    }
+    modules.sort();
+    modules.dedup();
+
+    // Separate address spaces preserve the rest of the catalog if a module crashes.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        for _ in 0..modules.len().min(4) {
+            let sender = sender.clone();
+            let modules = &modules;
+            let next = &next;
+            scope.spawn(move || {
+                while let Some(path) = modules.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                    let response = run_vst3_host(app, &["--scan".into(), path.to_string_lossy().into_owned()], "o scanner")
+                        .and_then(|bytes| serde_json::from_slice::<Vst3ScanResult>(&bytes).map_err(|error| error.to_string()))
+                        .map_err(|error| format!("{}: {error}", path.display()));
+                    if sender.send(response).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    drop(sender);
+    for response in receiver {
+        match response {
+            Ok(mut scanned) => {
+                result.plugins.append(&mut scanned.plugins);
+                result.errors.append(&mut scanned.errors);
+            }
+            Err(error) => result.errors.push(error),
+        }
+    }
+    result.plugins.sort_by_cached_key(|plugin| plugin.name.to_lowercase());
+    result
+}
+
 #[tauri::command]
-fn scan_vst3(app: AppHandle, directory: String) -> Result<Vst3ScanResult, String> {
+async fn scan_vst3(app: AppHandle, directory: String) -> Result<Vst3ScanResult, String> {
     let directory = PathBuf::from(directory)
         .canonicalize()
         .map_err(|_| "A pasta escolhida não existe ou não pode ser aberta.".to_string())?;
@@ -121,9 +192,9 @@ fn scan_vst3(app: AppHandle, directory: String) -> Result<Vst3ScanResult, String
         return Err("Escolha uma pasta, não um arquivo.".into());
     }
 
-    let output = run_vst3_host(&app, &["--scan".into(), directory.to_string_lossy().into_owned()], "o scanner")?;
-    serde_json::from_slice(&output)
-        .map_err(|_| "O scanner VST3 retornou uma resposta inválida.".into())
+    tauri::async_runtime::spawn_blocking(move || scan_vst3_directories(&app, vec![directory]))
+        .await
+        .map_err(|error| format!("O scanner VST3 foi interrompido: {error}"))
 }
 
 fn default_vst3_directories() -> Vec<PathBuf> {
@@ -141,21 +212,10 @@ fn default_vst3_directories() -> Vec<PathBuf> {
 }
 
 #[tauri::command]
-fn scan_default_vst3(app: AppHandle) -> Result<Vst3ScanResult, String> {
-    let mut plugins = Vec::new();
-    let mut errors = Vec::new();
-    for directory in default_vst3_directories() {
-        match run_vst3_host(&app, &["--scan".into(), directory.to_string_lossy().into_owned()], "o scanner") {
-            Ok(output) => match serde_json::from_slice::<Vst3ScanResult>(&output) {
-                Ok(mut result) => { plugins.append(&mut result.plugins); errors.append(&mut result.errors); }
-                Err(_) => errors.push(format!("{}: resposta inválida do scanner.", directory.display())),
-            },
-            Err(error) => errors.push(format!("{}: {error}", directory.display())),
-        }
-    }
-    plugins.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
-    plugins.dedup_by(|left, right| left.bundle_path.eq_ignore_ascii_case(&right.bundle_path) && left.class_id == right.class_id);
-    Ok(Vst3ScanResult { plugins, errors })
+async fn scan_default_vst3(app: AppHandle) -> Result<Vst3ScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_vst3_directories(&app, default_vst3_directories()))
+        .await
+        .map_err(|error| format!("O scanner VST3 foi interrompido: {error}"))
 }
 
 #[tauri::command]
@@ -176,7 +236,11 @@ fn probe_vst3(app: AppHandle, bundle_path: String, class_id: String) -> Result<V
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![desktop_runtime, pick_vst3_directory, scan_vst3, scan_default_vst3, probe_vst3])
+        .manage(vst_stream::Streams::default())
+        .invoke_handler(tauri::generate_handler![
+            desktop_runtime, pick_vst3_directory, scan_vst3, scan_default_vst3, probe_vst3,
+            vst_stream::open_vst_stream, vst_stream::process_vst_stream, vst_stream::close_vst_stream
+        ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar Vale Studio Desktop");
 }

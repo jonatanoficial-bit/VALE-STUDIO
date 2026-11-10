@@ -18,7 +18,7 @@ export type Vst3ProbeResult = {
 }
 
 type TauriCore = {
-  invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>
+  invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T>
 }
 
 type TauriWindow = Window & {
@@ -55,4 +55,36 @@ export async function probeVst3Plugin(plugin: Pick<Vst3Plugin, 'bundlePath' | 'c
   const core = nativeCore()
   if (!core) throw new Error('A qualificação VST3 está disponível apenas no Vale Studio Desktop.')
   return core.invoke<Vst3ProbeResult>('probe_vst3', { bundlePath: plugin.bundlePath, classId: plugin.classId })
+}
+
+export async function openVstStream(plugin: Pick<Vst3Plugin, 'bundlePath' | 'classId'> & { id: string }, frames: number, sampleRate: number, bpm: number) {
+  const core = nativeCore()
+  if (!core) throw new Error('O processamento VST3 exige o Vale Studio Desktop.')
+  const streamId = crypto.randomUUID()
+  const prefix = new TextEncoder().encode(streamId)
+  await core.invoke('open_vst_stream', { streamId, insertId: plugin.id, bundlePath: plugin.bundlePath, classId: plugin.classId, frames, sampleRate, bpm })
+  return {
+    async process(pcm: Float32Array, events: number[][], showEditor = false): Promise<Float32Array> {
+      const count = Math.min(events.length, 1024)
+      const bytes = new Uint8Array(prefix.length + pcm.byteLength + 4 + count * 16)
+      bytes.set(prefix)
+      bytes.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), prefix.length)
+      const view = new DataView(bytes.buffer)
+      const offset = prefix.length + pcm.byteLength
+      view.setUint32(offset, count | (showEditor ? 0x80000000 : 0), true)
+      for (let i = 0; i < count; i += 1) {
+        for (let field = 0; field < 4; field += 1) {
+          view.setUint32(offset + 4 + (i * 4 + field) * 4, events[i][field], true)
+        }
+      }
+      const result = await core.invoke<ArrayBuffer>('process_vst_stream', bytes)
+      if (!(result instanceof ArrayBuffer) || result.byteLength !== pcm.byteLength) {
+        throw new Error('O host retornou um bloco de áudio inválido.')
+      }
+      return new Float32Array(result)
+    },
+    close(): void {
+      void core.invoke('close_vst_stream', { streamId }).catch(() => undefined)
+    },
+  }
 }

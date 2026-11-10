@@ -176,3 +176,10 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .midi-panel h3 { margin: 5px 0; font-size: 17px; }.midi-panel p { max-width: 610px; margin: 0; color: #90aac1; font-size: 11px; line-height: 1.5; }.midi-controls { display: grid; gap: 8px; min-width: 240px; }.midi-controls select { padding: 10px; color: #dff5ff; background: #071422; border: 1px solid #30536e; border-radius: 9px; }.midi-controls small { color: #7897ae; font-size: 10px; line-height: 1.4; }
 @keyframes live-wave { 50% { filter: brightness(1.3); } }
 @media (max-width: 540px) { .midi-panel { margin: 14px; display: grid; }.midi-controls { min-width: 0; }.live-wave { width: 60%; } }
+.channel-strip .track-color-input { width: 36px; height: 26px; padding: 1px; border: 1px solid var(--line); background: transparent; border-radius: 5px; }
+.channel-sends { align-self: stretch; padding: 8px 0; border-block: 1px solid var(--line); }
+.channel-sends small { color: var(--muted); font-size: 9px; }
+.channel-sends .range-control { margin-top: 8px; }
+.master-strip { border-color: #3183b2; }
+.fade-control { flex: 0 0 auto; display: grid; gap: 4px; font-size: 10px; color: var(--muted); }
+.fade-control input { width: 78px; color: inherit; background: var(--surface-0); border: 1px solid var(--line); border-radius: 5px; padding: 3px; }

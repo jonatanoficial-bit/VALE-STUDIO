@@ -24,6 +24,7 @@ smtg_create_public_sdk_hosting_target()
 
 add_executable(vst3-host src/main.cpp)
 target_sources(vst3-host PRIVATE
+  "${SDK_ROOT}/public.sdk/source/common/memorystream.cpp"
   "${SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp"
   "${SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp"
 )

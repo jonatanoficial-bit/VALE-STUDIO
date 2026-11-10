@@ -2,7 +2,7 @@
 
 Esta pasta adiciona uma edição desktop ao Vale Studio web. Ela não substitui o app publicado no GitHub Pages: ambos usam a mesma interface React e o mesmo formato `.valestudio`.
 
-## O que o primeiro host faz
+## Usar VST3
 
 - abre um seletor nativo de pastas de plug-ins;
 - executa o scan em `vst3-host.exe`, fora do processo do app;
@@ -10,7 +10,11 @@ Esta pasta adiciona uma edição desktop ao Vale Studio web. Ela não substitui 
 - retorna nome, fabricante, versão, class ID e caminho do bundle;
 - encerra o scan após 25 segundos se ele travar.
 
-O scan já é nativo e real; aplicar DSP VST3 na cadeia de reprodução/exportação, a interface de parâmetros e o editor gráfico pertencem aos próximos marcos. Não apresente esta entrega como suporte completo de insert em tempo real.
+Em **Mixer → Inserts**, escolha o plug-in e inicie a reprodução. Para instrumentos, crie uma pista MIDI e adicione o instrumento ao primeiro slot. Abra **Editor** durante a reprodução para escolher o timbre no próprio plug-in. O processamento usa a saída principal estéreo do plug-in. Pare a reprodução para alterar a ordem, o bypass ou o tamanho do bloco dos inserts.
+
+O controle de buffer configura os blocos dos VST3. A latência também depende do WebView2, do driver e dos plug-ins. O estado do componente fica no perfil local do Windows. Backups do projeto ainda não levam esse estado local para outro PC.
+
+Para testar o retorno de áudio de um plug-in instalado, rode `node scripts/check-vst-stream.mjs "<caminho do módulo>" effect`. Para um instrumento que já inicia com um timbre carregado, troque `effect` por `instrument`.
 
 ## Ferramentas gratuitas necessárias
 
@@ -43,5 +47,5 @@ pnpm desktop:dev
 
 - Só escolha pastas sob seu controle; os plug-ins pertencem ao usuário e não são redistribuídos pelo Vale Studio.
 - Um VST3 pode falhar ou travar durante a inspeção. Por isso o scanner não roda no processo da interface, há timeout e erros por arquivo são retornados à tela.
-- A primeira versão é Windows x64. Não inclua VST2, AU ou AAX neste fluxo.
+- O host atual usa VST3 para Windows x64. VST2, AU e AAX seguem fora do host.
 - Não há custo de licença para o SDK VST3 atual sob MIT ou para Tauri, mas assinatura de código, hardware de teste e distribuição macOS são decisões futuras separadas.

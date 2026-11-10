@@ -46,7 +46,9 @@ O host C++ usará o VST3 SDK oficial. A camada Tauri só oferece janela, instala
 
 ## Estado do repositório
 
-O marco **V1 — desktop seguro** está ativo para Windows x64: `src-tauri/` contém o shell Tauri e sua bridge; `native/vst3-host/` contém o scanner C++ baseado nas classes de hosting do SDK. O scanner recebe uma única pasta escolhida pelo usuário, tem prazo de 25 segundos e roda fora do processo da interface. Classes encontradas podem ser adicionadas à cadeia de uma pista: identidade, ordem, bypass, parâmetros e estado opaco ficam no backup do projeto, mesmo quando o plug-in estiver ausente. Cada insert pode passar por uma qualificação isolada: o componente é instanciado e percorre a ativação/configuração de processamento em 48 kHz, sem receber áudio da sessão. A cadeia permanece em bypass até o próximo marco, que aplicará DSP VST3 ao render desktop; esta versão ainda não processa nem exibe o editor gráfico de um VST3. As instruções de compilação estão em [DESKTOP-WINDOWS.md](DESKTOP-WINDOWS.md).
+No Windows x64, o host isola a varredura por módulo e mantém uma instância em processo separado por insert ativo. O AudioWorklet envia blocos estéreo e eventos de nota durante a reprodução. A exportação passa os mesmos blocos pelo host antes da mixagem. O editor nativo usa uma janela do processo do plug-in, e o estado do componente fica no perfil local do Windows.
+
+O motor ainda depende do WebView2 para entrada e saída física. O ajuste de blocos vale para os inserts. A compensação atual cobre a fila da ponte, sem incluir a latência interna informada por cada plug-in. Faltam validação de sessões longas e de instrumentos comerciais, estado portátil no backup e suporte a VST2. As instruções de compilação estão em [DESKTOP-WINDOWS.md](DESKTOP-WINDOWS.md).
 
 ## Segurança, compatibilidade e licenças
 

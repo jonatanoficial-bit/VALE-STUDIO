@@ -3,7 +3,7 @@ name: Build Vale Studio Desktop (Windows)
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, codex/vst3-preview]
     paths:
       - 'src-tauri/**'
       - 'native/vst3-host/**'
@@ -35,6 +35,8 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Verify audio contracts and block routing
+        run: pnpm test
       - name: Build signed-free desktop package and VST3 host
         run: pnpm desktop:build
       - name: Upload Windows installer artifacts

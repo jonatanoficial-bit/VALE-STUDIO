@@ -84,6 +84,7 @@ export type Track = {
   color: string
   gainDb: number
   pan: number
+  sends?: { reverb: number; delay: number }
   mute: boolean
   solo: boolean
   armed: boolean
@@ -106,6 +107,8 @@ export type AudioProject = {
   bpm: number
   timeSignature: TimeSignature
   metronomeEnabled: boolean
+  masterGainDb?: number
+  vstBufferFrames?: 256 | 512 | 1024 | 2048 | 4096
   countInBars: 0 | 1 | 2
   calibrationFrames: number
   calibrationLabel: string

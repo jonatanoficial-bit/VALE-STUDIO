@@ -1,4 +1,4 @@
-const CACHE = 'vale-studio-shell-v0.1.4'
+const CACHE = 'vale-studio-shell-v0.1.5'
 const OFFLINE_FALLBACK = './offline.html'
 
 self.addEventListener('install', (event) => {

@@ -146,13 +146,11 @@ test('a edição Desktop mantém a web e escaneia VST3 fora do processo da inter
 test('o catálogo VST3 cria uma cadeia persistente sem alegar processamento web', async () => {
   const app = await read('src/App.tsx')
   const archive = await read('src/storage/projectArchive.ts')
-  const roadmap = await read('docs/VST3-ROADMAP.md')
   assert.match(app, /function addVst3Insert/)
   assert.match(app, /Inserir no projeto/)
   assert.match(app, /function Vst3InsertRack/)
-  assert.match(app, /A renderização VST3 nativa ainda será ativada no próximo marco/)
+  assert.match(app, /Os inserts ativos processam o áudio no Desktop/)
   assert.match(archive, /Number\.isFinite\(parameter\)/)
-  assert.match(roadmap, /ainda não processa nem exibe o editor gráfico/)
 })
 
 test('a sessão registra MIDI externo, notas visuais e descoberta automática VST3', async () => {
