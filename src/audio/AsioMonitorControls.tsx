@@ -3,12 +3,13 @@ import { asioMonitorAvailable, asioMonitorRunning, startAsioMonitor, stopAsioMon
 
 type Props = {
   armedTrackId?: string
+  channels: 1 | 2
   blocked: boolean
   setBusy: (value: boolean) => void
   onRecord: (settings: AsioSettings, dryReturn: boolean) => Promise<void>
 }
 
-export function AsioMonitorControls({ armedTrackId, blocked, setBusy, onRecord }: Props) {
+export function AsioMonitorControls({ armedTrackId, channels, blocked, setBusy, onRecord }: Props) {
   const [available, setAvailable] = useState(false)
   const [pending, setPending] = useState(false)
   const [info, setInfo] = useState<AsioMonitorInfo>()
@@ -78,7 +79,7 @@ export function AsioMonitorControls({ armedTrackId, blocked, setBusy, onRecord }
       } else {
         owner.current = armedTrackId
         setBusy(true)
-        const result = await startAsioMonitor({ frames, sampleRate: rate, input: input - 1, output: output - 1 })
+        const result = await startAsioMonitor({ frames, sampleRate: rate, input: input - 1, output: output - 1, channels })
         if (owner.current === armedTrackId) setInfo(result)
         else await stopAsioMonitor()
       }
@@ -96,7 +97,7 @@ export function AsioMonitorControls({ armedTrackId, blocked, setBusy, onRecord }
     <fieldset disabled={pending || Boolean(info) || blocked}>
       <label>Buffer (frames)<input type="number" min={0} max={32768} value={frames} onChange={(event) => setFrames(Number(event.target.value))} /></label>
       <label>Taxa (Hz)<input type="number" min={8000} max={192000} step={1} value={rate} onChange={(event) => setRate(Number(event.target.value))} /></label>
-      <label>Entrada<input type="number" min={1} max={256} value={input} onChange={(event) => setInput(Number(event.target.value))} /></label>
+      <label>{channels === 2 ? 'Primeira entrada do par estéreo' : 'Entrada mono'}<input type="number" min={1} max={257 - channels} value={input} onChange={(event) => setInput(Number(event.target.value))} /></label>
       <label>Saída inicial<input type="number" min={1} max={256} value={output} onChange={(event) => setOutput(Number(event.target.value))} /></label>
       <label><input type="checkbox" checked={dryReturn} onChange={(event) => setDryReturn(event.target.checked)} />Retorno na gravação</label>
     </fieldset>

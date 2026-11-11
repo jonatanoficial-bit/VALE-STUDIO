@@ -72,8 +72,9 @@ struct Device {
   ASIOSampleRate rate = 0;
   bool allocated = false, running = false, outputReady = false;
   float monitorGain = 0;
-  std::array<ASIOBufferInfo, 3> buffers {};
-  std::array<ASIOChannelInfo, 3> channels {};
+  long inputCount = 1, outputCount = 2;
+  std::array<ASIOBufferInfo, 4> buffers {};
+  std::array<ASIOChannelInfo, 4> channels {};
   std::atomic<unsigned> blocks {0};
   std::atomic<float> inputPeak {0.f};
   std::atomic<bool> interrupted {false};
@@ -135,17 +136,21 @@ struct Device {
       throw std::runtime_error("Could not confirm ASIO sample rate and buffer limits");
   }
 
-  void start(long count, long input, long output, float gain) {
+  void start(long count, long input, long output, float gain, long captureChannels = 1) {
     if (!supportsFrames(count)) throw std::runtime_error("Requested buffer is outside the driver capabilities");
-    if (input < 0 || input >= inputs || output < 0 || output >= outputs)
-      throw std::runtime_error("Requested input or output channel is unavailable");
+    if ((captureChannels != 1 && captureChannels != 2) || input < 0 || captureChannels > inputs || input > inputs - captureChannels)
+      throw std::runtime_error("Requested ASIO input channel or stereo pair is unavailable");
+    if (output < 0 || output >= outputs)
+      throw std::runtime_error("Requested ASIO output channel is unavailable");
     frames = count;
     monitorGain = gain;
-    const long channelCount = output + 1 < outputs ? 3 : 2;
+    inputCount = captureChannels;
+    outputCount = output + 1 < outputs ? 2 : 1;
+    const long channelCount = inputCount + outputCount;
     for (long index = 0; index < channelCount; ++index) {
       auto& channel = channels[index];
-      channel.isInput = index == 0 ? ASIOTrue : ASIOFalse;
-      channel.channel = index == 0 ? input : output + index - 1;
+      channel.isInput = index < inputCount ? ASIOTrue : ASIOFalse;
+      channel.channel = index < inputCount ? input + index : output + index - inputCount;
       if (driver->getChannelInfo(&channel) != ASE_OK || !supported(channel.type))
         throw std::runtime_error("Unsupported ASIO channel sample format");
       buffers[index].isInput = channel.isInput;
@@ -164,23 +169,31 @@ struct Device {
 
   void onBlock(long index) noexcept {
     if (index != 0 && index != 1) return;
-    const auto* input = buffers[0].buffers[index];
     float peak = inputPeak.load(std::memory_order_relaxed);
     const auto writeAt = captured.load(std::memory_order_relaxed);
+    const auto blockSamples = static_cast<uint32_t>(frames * inputCount);
     const bool store = !capture.empty() && !captureOverflow.load(std::memory_order_relaxed)
-      && writeAt - drained.load(std::memory_order_acquire) <= captureCapacity - static_cast<uint32_t>(frames);
+      && writeAt - drained.load(std::memory_order_acquire) <= captureCapacity - blockSamples;
     if (!capture.empty() && !store) captureOverflow.store(true);
     for (long frame = 0; frame < frames; ++frame) {
-      const float sample = input ? readSample(input, channels[0].type, frame) : 0.f;
-      const float clean = std::isfinite(sample) ? sample : 0.f;
-      peak = std::max(peak, std::abs(clean));
-      if (store) capture[(writeAt + frame) % captureCapacity] = clean;
-      for (int channel = 1; channel < 3; ++channel) {
+      std::array<float, 2> samples {};
+      for (long channel = 0; channel < inputCount; ++channel) {
+        const auto* input = buffers[channel].buffers[index];
+        const float sample = input ? readSample(input, channels[channel].type, frame) : 0.f;
+        const float clean = std::isfinite(sample) ? sample : 0.f;
+        samples[channel] = clean;
+        peak = std::max(peak, std::abs(clean));
+        if (store) capture[(writeAt + frame * inputCount + channel) % captureCapacity] = clean;
+      }
+      for (long output = 0; output < outputCount; ++output) {
+        const long channel = inputCount + output;
+        const float sample = inputCount == 1 ? samples[0] :
+          outputCount == 1 ? (samples[0] + samples[1]) * 0.5f : samples[output];
         if (auto* target = buffers[channel].buffers[index])
-          writeSample(target, channels[channel].type, frame, clean * monitorGain);
+          writeSample(target, channels[channel].type, frame, sample * monitorGain);
       }
     }
-    if (store) captured.store(writeAt + frames, std::memory_order_release);
+    if (store) captured.store(writeAt + blockSamples, std::memory_order_release);
     inputPeak.store(peak, std::memory_order_relaxed);
     blocks.fetch_add(1, std::memory_order_relaxed);
     if (outputReady) driver->outputReady();
@@ -280,6 +293,34 @@ void verifyMonitorConversion() {
   device.onBlock(0);
   if (!device.captureOverflow.load() || device.captured.load() != start + 4)
     throw std::runtime_error("Native capture ring failed to report an overflow");
+
+  Device stereo;
+  const std::array<float, 4> rightInput {-0.25f, 0.75f, 0.5f, -0.5f};
+  stereo.frames = device.frames;
+  stereo.inputCount = 2;
+  stereo.monitorGain = 0.25f;
+  stereo.capture.resize(Device::captureCapacity);
+  stereo.captured.store(start);
+  stereo.drained.store(start);
+  stereo.buffers[0].buffers[0] = input.data();
+  auto rightSamples = rightInput;
+  stereo.buffers[1].buffers[0] = rightSamples.data();
+  stereo.buffers[2].buffers[0] = left.data();
+  stereo.buffers[3].buffers[0] = right.data();
+  stereo.channels[0].type = ASIOSTInt16LSB;
+  for (auto channel = 1; channel < 4; ++channel) stereo.channels[channel].type = ASIOSTFloat32LSB;
+  stereo.onBlock(0);
+  const std::array<float, 8> expectedPcm {0.5f, -0.25f, -0.5f, 0.75f, 0.f, 0.5f, 0.25f, -0.5f};
+  if (stereo.captured.load() != start + expectedPcm.size() || left != expected)
+    throw std::runtime_error("Native stereo capture frame count or left return failed");
+  for (size_t sample = 0; sample < expectedPcm.size(); ++sample) {
+    if (stereo.capture[(start + sample) % Device::captureCapacity] != expectedPcm[sample])
+      throw std::runtime_error("Native stereo capture did not preserve both channels");
+  }
+  for (size_t frame = 0; frame < right.size(); ++frame) {
+    if (right[frame] != rightInput[frame] * stereo.monitorGain)
+      throw std::runtime_error("Native stereo monitoring did not preserve the right channel");
+  }
 }
 
 void pumpMessages() {
@@ -291,12 +332,12 @@ void report(const Device& device, std::ostream& output = std::cout) {
   output << "{\"inputs\":" << device.inputs << ",\"outputs\":" << device.outputs
     << ",\"sampleRate\":" << device.rate << ",\"minimum\":" << device.minimum << ",\"maximum\":" << device.maximum
     << ",\"preferred\":" << device.preferred << ",\"granularity\":" << device.step
-    << ",\"frames\":" << device.frames << ",\"inputLatency\":" << device.inputLatency
+    << ",\"frames\":" << device.frames << ",\"channels\":" << device.inputCount << ",\"inputLatency\":" << device.inputLatency
     << ",\"outputLatency\":" << device.outputLatency << ",\"callbacks\":" << device.blocks.load()
     << ",\"inputPeak\":" << device.inputPeak.load() << "}" << std::endl;
 }
 
-void monitor(Device& device, long frames, double rate, long input, long output, FILE* capturePipe, float gain) {
+void monitor(Device& device, long frames, double rate, long input, long output, FILE* capturePipe, float gain, long channels) {
   const HANDLE parent = GetStdHandle(STD_INPUT_HANDLE);
   if (GetFileType(parent) != FILE_TYPE_PIPE) throw std::runtime_error("Monitoring requires a parent process pipe");
   device.setSampleRate(rate);
@@ -307,7 +348,7 @@ void monitor(Device& device, long frames, double rate, long input, long output, 
     device.capture.resize(Device::captureCapacity);
   }
   // Keep the initial return level conservative. Audio stays on the driver callback.
-  device.start(blockSize, input, output, gain);
+  device.start(blockSize, input, output, gain, channels);
   auto lastCallback = std::chrono::steady_clock::now();
   unsigned seen = 0;
   while (PeekNamedPipe(parent, nullptr, 0, nullptr, nullptr, nullptr)) {
@@ -353,7 +394,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     const bool capturing = action == L"--capture";
     if (argc < 3 || (action != L"--probe" && action != L"--verify" && action != L"--monitor" && !capturing)) {
-      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --monitor DRIVER FRAMES RATE INPUT OUTPUT | --capture DRIVER FRAMES RATE INPUT OUTPUT RETURN | --self-test\n";
+      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --monitor DRIVER FRAMES RATE INPUT OUTPUT | --capture DRIVER FRAMES RATE INPUT OUTPUT RETURN [CHANNELS] | --self-test\n";
       return 64;
     }
     std::unique_ptr<FILE, decltype(&std::fclose)> capturePipe(nullptr, std::fclose);
@@ -370,9 +411,12 @@ int wmain(int argc, wchar_t** argv) {
     Device device;
     device.open(argv[2]);
     if (action == L"--monitor" || capturing) {
-      if (argc != (capturing ? 8 : 7)) throw std::runtime_error("Specify frames, rate and both channel indexes");
+      if ((!capturing && argc != 7 && argc != 8) || (capturing && argc != 8 && argc != 9))
+        throw std::runtime_error("Specify frames, rate, input, output and capture options");
       const float gain = !capturing || std::wstring(argv[7]) == L"1" ? 0.125f : 0.f;
-      monitor(device, std::stol(argv[3]), std::stod(argv[4]), std::stol(argv[5]), std::stol(argv[6]), capturePipe.get(), gain);
+      const int channelArg = capturing ? 8 : 7;
+      const long channels = argc > channelArg ? std::stol(argv[channelArg]) : 1;
+      monitor(device, std::stol(argv[3]), std::stod(argv[4]), std::stol(argv[5]), std::stol(argv[6]), capturePipe.get(), gain, channels);
       return 0;
     }
     const bool verify = action == L"--verify";

@@ -229,6 +229,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .recording-input { display: grid; gap: 5px; }
 .recording-input meter { width: 110px; }
 .recording-controls, .mixer-routing { display: flex; flex-wrap: wrap; gap: 6px; }
+.recording-controls label { display: grid; gap: 4px; color: #a6bed0; font-size: 11px; }
+.recording-controls select { padding: 4px 8px; }
 .record-action { color: #fff; background: #aa2a44; border-color: #ed6475; }
 .timeline-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .track-area .timeline-tools .track-area-actions { margin: 0; padding: 12px 0; flex-wrap: wrap; }

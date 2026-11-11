@@ -59,6 +59,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   })
   const hasInvalidTrackLinks = (project.tracks as unknown[]).some((track) => {
     const item = asRecord(track)
+    if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true
     const inserts = item?.vst3Inserts
     const hasInvalidInsert = inserts !== undefined && (!Array.isArray(inserts) || inserts.some((insert) => {
       const value = asRecord(insert)

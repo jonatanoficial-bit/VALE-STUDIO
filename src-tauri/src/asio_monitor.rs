@@ -20,10 +20,10 @@ struct Session {
     capture_done: mpsc::Receiver<()>,
 }
 
-#[derive(Default)]
 struct CaptureQueue {
     bytes: VecDeque<u8>,
     error: Option<String>,
+    channels: usize,
 }
 
 #[derive(Serialize)]
@@ -54,14 +54,34 @@ fn read_capture(reader: &mut impl Read, capture: &Mutex<CaptureQueue>) {
 
 impl CaptureQueue {
     fn drain(&mut self, limit: usize, ended: bool) -> CapturePacket {
-        if ended && self.bytes.len() % 4 != 0 {
+        let frame_size = 4 * self.channels;
+        if ended && self.bytes.len() % frame_size != 0 {
             self.error.get_or_insert("O driver encerrou com um frame PCM incompleto.".into());
         }
-        let count = (self.bytes.len() / 4).min(limit);
+        let count = (self.bytes.len() / frame_size).min(limit) * self.channels;
         let samples = (0..count)
             .map(|_| f32::from_le_bytes(std::array::from_fn(|_| self.bytes.pop_front().unwrap())))
             .collect();
         CapturePacket { samples, ended, error: self.error.clone() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_packets_keep_frames_intact_across_pipe_reads() {
+        let mut queue = CaptureQueue { bytes: VecDeque::new(), error: None, channels: 2 };
+        queue.bytes.extend(0.25_f32.to_le_bytes());
+        assert!(queue.drain(1, false).samples.is_empty());
+
+        queue.bytes.extend((-0.5_f32).to_le_bytes());
+        queue.bytes.extend(0.75_f32.to_le_bytes());
+        assert_eq!(queue.drain(1, false).samples, [0.25, -0.5]);
+        let tail = queue.drain(usize::MAX, true);
+        assert!(tail.samples.is_empty());
+        assert!(tail.error.is_some());
     }
 }
 
@@ -99,6 +119,7 @@ impl Drop for Session {
 #[serde(rename_all = "camelCase")]
 pub struct MonitorInfo {
     frames: u32,
+    channels: u32,
     sample_rate: f64,
     input_latency: u32,
     output_latency: u32,
@@ -125,8 +146,11 @@ pub async fn start_asio_monitor(
     output: u32,
     capture: Option<bool>,
     dry_return: Option<bool>,
+    channels: Option<u32>,
 ) -> Result<MonitorInfo, String> {
-    if !cfg!(windows) || frames > 32768 || !(8000..=192000).contains(&sample_rate) || input > 255 || output > 255 {
+    let capturing = capture.unwrap_or(false);
+    let channels = channels.unwrap_or(1);
+    if !cfg!(windows) || frames > 32768 || !(8000..=192000).contains(&sample_rate) || input > 255 || output > 255 || !(1..=2).contains(&channels) {
         return Err("Configuração ASIO inválida.".into());
     }
     let path = host_path().ok_or("O executável de desenvolvimento ASIO está indisponível.")?;
@@ -142,7 +166,6 @@ pub async fn start_asio_monitor(
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let capturing = capture.unwrap_or(false);
         command
             .args([
                 if capturing { "--capture" } else { "--monitor" }.to_owned(),
@@ -152,7 +175,10 @@ pub async fn start_asio_monitor(
                 input.to_string(),
                 output.to_string(),
             ]);
-        if capturing { command.arg(if dry_return.unwrap_or(false) { "1" } else { "0" }); }
+        if capturing {
+            command.arg(if dry_return.unwrap_or(false) { "1" } else { "0" });
+        }
+        command.arg(channels.to_string());
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -162,7 +188,9 @@ pub async fn start_asio_monitor(
         let (ready_tx, ready_rx) = mpsc::channel();
         let (error_tx, diagnostics) = mpsc::channel();
         let (capture_done_tx, capture_done) = mpsc::channel();
-        let capture = capturing.then(|| Arc::new(Mutex::new(CaptureQueue::default())));
+        let capture = capturing.then(|| Arc::new(Mutex::new(CaptureQueue {
+            bytes: VecDeque::new(), error: None, channels: channels as usize,
+        })));
         let stream_capture = capture.clone();
         let stdout = child.stdout.take().expect("stdout redirecionado");
         let stderr = child.stderr.take().expect("stderr redirecionado");
@@ -188,7 +216,7 @@ pub async fn start_asio_monitor(
         });
         let session = Session { child, diagnostics, capture, capture_done };
         let info = match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(info)) if info.callbacks > 0 && info.frames > 0 && info.sample_rate.is_finite() && info.sample_rate > 0.0 => info,
+            Ok(Ok(info)) if info.callbacks > 0 && info.frames > 0 && info.channels == channels && info.sample_rate.is_finite() && info.sample_rate > 0.0 => info,
             _ => return Err(session.error("O ASIO4ALL não confirmou blocos de áudio.")),
         };
         *current = Some(session);

@@ -117,15 +117,16 @@ export class AudioEngine {
   private playing = false
   private stream?: MediaStream
   private inputSource?: MediaStreamAudioSourceNode
-  private inputAnalyser?: AnalyserNode
+  private inputMeter?: { peak: number; rms: number }
   private recorder?: AudioWorkletNode
   private monitorGain?: GainNode
   private recordingChunks: Float32Array[] = []
+  private recordingChannels: 1 | 2 = 1
   private recordingTrackId?: string
   private recordingStartFrame = 0
   private recordingSettings?: MediaTrackSettings
   private asioCapture?: {
-    rate: number; frames: number; peak: number; rms: number; timer?: number
+    rate: number; frames: number; timer?: number
     pending?: Promise<void>; error?: string; stopping: boolean
   }
   private resolveFlush?: () => void
@@ -692,10 +693,24 @@ export class AudioEngine {
     })
   }
 
-  private async requestInput(): Promise<MediaStream> {
+  private async requestInput(channels: 1 | 2): Promise<MediaStream> {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Este navegador não oferece acesso ao microfone.')
-    const constraints: MediaTrackConstraints = { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    return navigator.mediaDevices.getUserMedia({ audio: constraints })
+    const channelCount = channels === 2 ? { exact: 2 } : 1
+    const constraints: MediaTrackConstraints = { channelCount, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: constraints })
+    } catch (error) {
+      if (channels === 2 && error instanceof DOMException && error.name === 'OverconstrainedError') {
+        throw new Error('A entrada de áudio selecionada não oferece captura estéreo.')
+      }
+      throw error
+    }
+    if (channels === 2 && stream.getAudioTracks()[0]?.getSettings().channelCount !== 2) {
+      stream.getTracks().forEach((track) => track.stop())
+      throw new Error('O sistema não confirmou dois canais de entrada para a captura estéreo.')
+    }
+    return stream
   }
 
   private queueDurableChunk(): void {
@@ -704,14 +719,14 @@ export class AudioEngine {
     const frames = this.pendingDurableFrames
     this.pendingDurableChunks = []
     this.pendingDurableFrames = 0
-    const pcm = new Float32Array(frames)
+    const pcm = new Float32Array(frames * this.recordingChannels)
     let offset = 0
     chunks.forEach((chunk) => { pcm.set(chunk, offset); offset += chunk.length })
     const chunk: RecordingPcmChunk = {
       sequence: this.durableSequence,
       firstFrame: this.durableQueuedFrames,
       frameCount: frames,
-      channels: 1,
+      channels: this.recordingChannels,
       pcm: pcm.buffer,
       writtenAt: new Date().toISOString(),
     }
@@ -728,21 +743,21 @@ export class AudioEngine {
     })
   }
 
-  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): Promise<RecordingStart> {
+  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode, channels: 1 | 2, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): Promise<RecordingStart> {
     if (!this.context || !this.context.audioWorklet) throw new Error('AudioWorklet não está disponível. A gravação multipista não pode ser iniciada com segurança neste navegador.')
     if (this.recordingTrackId) throw new Error('Já existe uma gravação em andamento.')
 
-    const stream = await this.requestInput()
+    const stream = await this.requestInput(channels)
     const [inputTrack] = stream.getAudioTracks()
     this.recordingSettings = inputTrack?.getSettings()
     this.stream = stream
     this.inputSource = this.context.createMediaStreamSource(stream)
-    this.inputAnalyser = this.context.createAnalyser()
-    this.inputAnalyser.fftSize = 1024
-    this.recorder = new AudioWorkletNode(this.context, 'vale-pcm-recorder', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
+    this.recorder = new AudioWorkletNode(this.context, 'vale-pcm-recorder', {
+      numberOfInputs: 1, numberOfOutputs: 1, channelCount: channels,
+      channelCountMode: 'explicit', channelInterpretation: channels === 2 ? 'discrete' : 'speakers',
+    })
     const silent = this.context.createGain()
     silent.gain.value = 0
-    this.inputSource.connect(this.inputAnalyser)
     this.inputSource.connect(this.recorder)
     this.recorder.connect(silent).connect(this.context.destination)
     this.monitorGain = this.context.createGain()
@@ -750,16 +765,29 @@ export class AudioEngine {
     const graph = this.liveGraphs.get(trackId)
     this.inputSource.connect(this.monitorGain).connect(graph?.input ?? graph?.highPass ?? this.context.destination)
 
-    this.prepareRecording(trackId, project.audioSampleRate, onPcmChunk)
+    this.prepareRecording(trackId, project.audioSampleRate, channels, onPcmChunk)
     this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[] }>) => {
-      if (data.type === 'pcm' && data.channels?.[0]) this.acceptRecordingPcm(new Float32Array(data.channels[0]))
+      if (data.type === 'pcm' && data.channels?.length === channels) {
+        const left = new Float32Array(data.channels[0])
+        if (channels === 1) this.acceptRecordingPcm(left)
+        else {
+          const right = new Float32Array(data.channels[1])
+          const interleaved = new Float32Array(left.length * 2)
+          for (let frame = 0; frame < left.length; frame += 1) {
+            interleaved[2 * frame] = left[frame]
+            interleaved[2 * frame + 1] = right[frame]
+          }
+          this.acceptRecordingPcm(interleaved)
+        }
+      }
       if (data.type === 'flushed') this.resolveFlush?.()
     }
     return { inputSettings: this.recordingSettings, startFrame: this.recordingStartFrame }
   }
 
-  private prepareRecording(trackId: string, projectRate: number, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): void {
+  private prepareRecording(trackId: string, projectRate: number, channels: 1 | 2, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): void {
     this.recordingChunks = []
+    this.recordingChannels = channels
     this.pendingDurableChunks = []
     this.pendingDurableFrames = 0
     this.persistedChunks = 0
@@ -775,34 +803,35 @@ export class AudioEngine {
 
   private acceptRecordingPcm(pcm: Float32Array): void {
     if (!pcm.length) return
+    const frames = pcm.length / this.recordingChannels
+    if (!Number.isInteger(frames)) throw new Error('A captura recebeu um frame PCM incompleto.')
     this.recordingChunks.push(pcm)
     if (this.persistRecordingChunk) {
       this.pendingDurableChunks.push(pcm)
-      this.pendingDurableFrames += pcm.length
+      this.pendingDurableFrames += frames
       if (this.pendingDurableFrames >= 8192) this.queueDurableChunk()
     }
-    const capture = this.asioCapture
-    if (capture) {
-      capture.frames += pcm.length
-      let peak = 0
-      let energy = 0
-      for (const sample of pcm) { peak = Math.max(peak, Math.abs(sample)); energy += sample * sample }
-      capture.peak = peak
-      capture.rms = Math.sqrt(energy / pcm.length)
+    if (this.asioCapture) this.asioCapture.frames += frames
+    let peak = 0
+    let energy = 0
+    for (const sample of pcm) {
+      peak = Math.max(peak, Math.abs(sample))
+      energy += sample * sample
     }
+    this.inputMeter = { peak, rms: Math.sqrt(energy / pcm.length) }
   }
 
-  async startAsioRecording(trackId: string, projectRate: number, settings: AsioSettings, dryReturn: boolean,
+  async startAsioRecording(trackId: string, projectRate: number, settings: AsioSettings, dryReturn: boolean, channels: 1 | 2,
     onPcmChunk: (chunk: RecordingPcmChunk) => Promise<void>, onFailure: (reason: string) => void): Promise<RecordingStart> {
     if (!this.context || this.playing || this.recordingTrackId) throw new Error('Pare o transporte antes de gravar pelo ASIO.')
-    const info = await startAsioMonitor({ ...settings, capture: true, dryReturn })
-    if (info.sampleRate !== settings.sampleRate) {
+    const info = await startAsioMonitor({ ...settings, capture: true, dryReturn, channels })
+    if (info.sampleRate !== settings.sampleRate || info.channels !== channels) {
       await finishAsioCapture()
-      throw new Error('O driver abriu com uma taxa diferente da solicitada.')
+      throw new Error('O driver abriu com uma taxa ou quantidade de canais diferente da solicitada.')
     }
     this.recordingSettings = undefined
-    this.prepareRecording(trackId, projectRate, onPcmChunk)
-    const capture: NonNullable<AudioEngine['asioCapture']> = { rate: info.sampleRate, frames: 0, peak: 0, rms: 0, stopping: false }
+    this.prepareRecording(trackId, projectRate, channels, onPcmChunk)
+    const capture: NonNullable<AudioEngine['asioCapture']> = { rate: info.sampleRate, frames: 0, stopping: false }
     this.asioCapture = capture
     const poll = () => {
       if (capture.stopping) return
@@ -826,17 +855,7 @@ export class AudioEngine {
   }
 
   getInputMeter(): { peak: number; rms: number } | undefined {
-    if (this.asioCapture) return { peak: this.asioCapture.peak, rms: this.asioCapture.rms }
-    if (!this.inputAnalyser) return undefined
-    const data = new Float32Array(this.inputAnalyser.fftSize)
-    this.inputAnalyser.getFloatTimeDomainData(data)
-    let peak = 0
-    let sum = 0
-    data.forEach((sample) => {
-      peak = Math.max(peak, Math.abs(sample))
-      sum += sample * sample
-    })
-    return { peak, rms: Math.sqrt(sum / data.length) }
+    return this.inputMeter
   }
 
   getTrackMeter(trackId: string): { peak: number; rms: number } | undefined {
@@ -878,21 +897,25 @@ export class AudioEngine {
     await this.durableWrite
     try {
       if (capture?.error) throw new Error(capture.error)
-      const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length, 0)
+      const channels = this.recordingChannels
+      const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length / channels, 0)
       const sampleRate = capture?.rate ?? this.context.sampleRate
-      const buffer = this.context.createBuffer(1, Math.max(1, frames), sampleRate)
-      const output = buffer.getChannelData(0)
-      let offset = 0
-      for (const chunk of this.recordingChunks) {
-        output.set(chunk, offset)
-        offset += chunk.length
+      const buffer = this.context.createBuffer(channels, Math.max(1, frames), sampleRate)
+      for (let channel = 0; channel < channels; channel += 1) {
+        const output = buffer.getChannelData(channel)
+        let offset = 0
+        for (const chunk of this.recordingChunks) {
+          for (let sample = channel; sample < chunk.length; sample += channels) {
+            output[offset++] = chunk[sample]
+          }
+        }
       }
       return {
         blob: encodeWav(buffer, 32),
         buffer,
         peaks: buildPeaks(buffer),
         frames,
-        channels: 1,
+        channels,
         sampleRate,
         inputSettings: this.recordingSettings,
         durability: { persistedChunks: this.persistedChunks, persistedFrames: this.persistedFrames, error: this.durableFailure },
@@ -904,13 +927,12 @@ export class AudioEngine {
 
   private clearRecording(): void {
     safeDisconnect(this.inputSource)
-    safeDisconnect(this.inputAnalyser)
     safeDisconnect(this.recorder)
     safeDisconnect(this.monitorGain)
     this.stream?.getTracks().forEach((track) => track.stop())
     this.stream = undefined
     this.inputSource = undefined
-    this.inputAnalyser = undefined
+    this.inputMeter = undefined
     this.recorder = undefined
     this.monitorGain = undefined
     this.recordingTrackId = undefined

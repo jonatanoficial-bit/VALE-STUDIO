@@ -90,6 +90,7 @@ export type Track = {
   solo: boolean
   armed: boolean
   monitorMode: MonitorMode
+  recordChannels?: 1 | 2
   effects: EffectSettings
   vst3Inserts: Vst3Insert[]
   kind?: 'audio' | 'midi'

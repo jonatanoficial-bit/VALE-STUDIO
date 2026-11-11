@@ -818,15 +818,16 @@ export default function App() {
         throw new Error('Selecione uma taxa ASIO entre 8.000 e 192.000 Hz.')
       }
       if (!asio && !isPlaying && !await startPlayback(project)) return
-      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: engineRef.current.getCurrentFrame(project.audioSampleRate), sampleRate: asio?.sampleRate ?? audio.sampleRate, channels: 1 })
+      const channels = recordTrack.recordChannels ?? 1
+      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: engineRef.current.getCurrentFrame(project.audioSampleRate), sampleRate: asio?.sampleRate ?? audio.sampleRate, channels })
       activeDraftRef.current = { id: draftId, projectId: project.id, trackId: recordTrack.id }
       const persistChunk = async (chunk: RecordingPcmChunk) => {
         await projectRepository.appendTakeDraftChunk({ ...chunk, draftId })
       }
       const recording = asio
-        ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, persistChunk,
+        ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, channels, persistChunk,
           (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }))
-        : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, persistChunk)
+        : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, channels, persistChunk)
       if (!asio) await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
       setRecordFrom(recording.startFrame)
       setRecordingPeaks([])
@@ -850,7 +851,7 @@ export default function App() {
     if (!audio) return
     try {
       const recovered = await projectRepository.recoverTakeDraft(draft.id)
-      if (!recovered || recovered.pcm.length < 128) { setToast({ tone: 'error', text: 'Este rascunho não contém frames suficientes para recuperar um take.' }); return }
+      if (!recovered || recovered.pcm.length / recovered.channels < 128) { setToast({ tone: 'error', text: 'Este rascunho não contém frames suficientes para recuperar um take.' }); return }
       const buffer = engineRef.current.createBufferFromPcm(recovered.pcm, recovered.sampleRate, recovered.channels)
       const assetId = makeId()
       const takeId = makeId()
@@ -1109,6 +1110,12 @@ export default function App() {
         </div>
         {selectedTrack?.kind !== 'midi' && <div className="recording-input"><span>Nível de entrada</span><meter min={0} max={1} value={Math.min(1, inputPeak ?? 0)} aria-label="Nível de entrada" /></div>}
         <div className="recording-controls">
+          {selectedTrack && selectedTrack.kind !== 'midi' && <label>Formato de entrada <select value={selectedTrack.recordChannels ?? 1} disabled={isRecording || asioBusy} onChange={(event) => {
+            const recordChannels = event.target.value === '2' ? 2 : 1
+            updateTrack(selectedTrack.id, (current) => ({ ...current, recordChannels }))
+          }}>
+            <option value={1}>Mono</option><option value={2}>Estéreo</option>
+          </select></label>}
           {selectedTrack?.kind === 'midi' && <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>}
           {selectedTrack && <button className="button secondary" disabled={isRecording} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
           <button className="button record-action" disabled={!selectedTrack} onClick={() => void toggleRecording()}>{isRecording ? '■ Salvar take' : '● Gravar'}</button>
@@ -1117,6 +1124,7 @@ export default function App() {
       {desktopRuntime && <AsioMonitorControls
         key={project.id}
         armedTrackId={selectedTrack?.armed && selectedTrack.kind !== 'midi' ? selectedTrack.id : undefined}
+        channels={selectedTrack?.recordChannels ?? 1}
         blocked={isPlaying || isStarting || isRecording || isMetronome || Boolean(previewingTakeId)}
         setBusy={setAsioBusy}
         onRecord={toggleRecording}
@@ -1198,7 +1206,7 @@ export default function App() {
               const target = project.tracks[index + (event.key === 'ArrowUp' ? -1 : 1)]
               if (target) reorderTracks(track.id, target.id)
             }}>⠿</button>
-          <div><strong>{track.name}</strong><small>{track.kind === 'midi' ? 'Instrumento MIDI' : track.monitorMode === 'software' ? 'Retorno ligado' : 'Áudio mono'}</small></div>
+          <div><strong>{track.name}</strong><small>{track.kind === 'midi' ? 'Instrumento MIDI' : track.recordChannels === 2 ? 'Entrada estéreo' : 'Entrada mono'}</small></div>
           <TrackMeter value={track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' ? inputPeak : trackPeaks[track.id]} />
           <div className="track-toggles">
             <Toggle pressed={track.armed} label="ARM" danger onClick={() => { if (!isRecording) updateTrack(track.id, (current) => ({ ...current, armed: !current.armed })) }} />

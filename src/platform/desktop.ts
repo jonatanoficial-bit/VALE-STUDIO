@@ -59,6 +59,7 @@ export async function probeVst3Plugin(plugin: Pick<Vst3Plugin, 'bundlePath' | 'c
 
 export type AsioMonitorInfo = {
   frames: number
+  channels: number
   sampleRate: number
   inputLatency: number
   outputLatency: number
@@ -71,7 +72,7 @@ export async function asioMonitorAvailable(): Promise<boolean> {
 export type AsioSettings = { frames: number; sampleRate: number; input: number; output: number }
 export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string }
 
-export async function startAsioMonitor(settings: AsioSettings & { capture?: boolean; dryReturn?: boolean }): Promise<AsioMonitorInfo> {
+export async function startAsioMonitor(settings: AsioSettings & { capture?: boolean; dryReturn?: boolean; channels?: 1 | 2 }): Promise<AsioMonitorInfo> {
   const core = nativeCore()
   if (!core) throw new Error('O retorno ASIO exige o Vale Studio Desktop.')
   return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)
