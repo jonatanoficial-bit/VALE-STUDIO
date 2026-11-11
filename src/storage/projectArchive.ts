@@ -1,5 +1,5 @@
 import type { AudioProject, MediaAsset } from '../domain/model'
-import { MAX_AUX_SENDS } from '../domain/model'
+import { AUTOMATION_MODES, MAX_AUX_SENDS } from '../domain/model'
 import { projectRepository } from './projectRepository'
 
 export const PROJECT_ARCHIVE_MIME = 'application/x-valestudio+json'
@@ -101,7 +101,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     }
     if (item?.automation !== undefined) {
       const automation = asRecord(item.automation)
-      if (!automation || (automation.mode !== 'off' && automation.mode !== 'read') ||
+      if (!automation || !AUTOMATION_MODES.some((mode) => mode === automation.mode) ||
         !validAutomationLane(automation.gainDb, -60, 6) || !validAutomationLane(automation.pan, -1, 1)) return true
     }
     const effectSettings = asRecord(item?.effects)

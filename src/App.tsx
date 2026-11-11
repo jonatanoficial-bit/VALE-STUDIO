@@ -3,12 +3,13 @@ import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './a
 import type { AsioSettings } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
 import { AudioInputSelect } from './audio/AudioInputSelect'
-import { AutomationEditor } from './audio/AutomationEditor'
+import { AutomationEditor, AutomationModeSelect } from './audio/AutomationEditor'
+import { isAutomationWriter } from './audio/automation'
 import { AuxRouting } from './audio/AuxRouting'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
-import type { AudioProject, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
+import type { AudioProject, AutomationLane, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, TrackAutomation, Vst3Insert } from './domain/model'
 import { createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
@@ -194,6 +195,22 @@ function FaderScale() {
     <span key={db} style={{ top: `${(6 - db) / 66 * 100}%` }}>{db > 0 ? '+' : ''}{db}</span>)}</span>
 }
 
+function MixAutomationControl({ track, lane, playing, value, onValue, onRelease }: {
+  track: Track; lane: AutomationLane; playing: boolean; value: number;
+  onValue: (value: number) => void; onRelease: () => void
+}) {
+  const fader = lane === 'gainDb'
+  return <input type="range" className={fader ? 'fader' : undefined}
+    aria-label={`${fader ? 'Volume' : 'Panorama'} de ${track.name}`}
+    min={fader ? -60 : -1} max={fader ? 6 : 1} step={fader ? 0.5 : 0.05} value={value}
+    disabled={playing && track.automation?.mode === 'read' && Boolean(track.automation[lane]?.length)}
+    onChange={(event) => onValue(Number(event.target.value))}
+    onPointerDown={(event) => {
+      if (playing && track.automation?.mode === 'touch') event.currentTarget.setPointerCapture(event.pointerId)
+    }}
+    onPointerUp={onRelease} onPointerCancel={onRelease} onLostPointerCapture={onRelease} onKeyUp={onRelease} onBlur={onRelease} />
+}
+
 function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm: number, signature: TimeSignature) => void; onCancel: () => void }) {
   const [name, setName] = useState('Minha nova música')
   const [bpm, setBpm] = useState(100)
@@ -262,6 +279,7 @@ export default function App() {
   const [clipTool, setClipTool] = useState<'move' | 'trim' | 'pencil'>('move')
   const [rulerMode, setRulerMode] = useState<'time' | 'bars'>('time')
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
+  const [mixAutomationValues, setMixAutomationValues] = useState<Record<string, Partial<Record<AutomationLane, number>>>>({})
   const trackDialog = useRef<HTMLDialogElement>(null)
   const newTrackDialog = useRef<HTMLDialogElement>(null)
   const firstFadeInput = useRef<HTMLInputElement>(null)
@@ -343,7 +361,11 @@ export default function App() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (!project) return
-      setPlayhead(engineRef.current.getCurrentFrame(project.audioSampleRate))
+      const frame = engineRef.current.getCurrentFrame(project.audioSampleRate)
+      setPlayhead(frame)
+      if (isPlaying && view === 'mixer') {
+        setMixAutomationValues(Object.fromEntries(project.tracks.map((track) => [track.id, engineRef.current.automationControls(track, frame)])))
+      }
       setInputPeak(engineRef.current.getInputMeter()?.peak)
       if (isRecording && selectedTrack?.kind !== 'midi') {
         setRecordingPeaks((peaks) => [...peaks.slice(-119), Math.max(0.02, engineRef.current.getInputMeter()?.peak ?? 0.02)])
@@ -362,7 +384,7 @@ export default function App() {
       setTrackPeaks(next)
     }, 80)
     return () => window.clearInterval(timer)
-  }, [project, isRecording, selectedTrack?.kind])
+  }, [project, isRecording, selectedTrack?.kind, isPlaying, view])
 
   function updateProject(change: (current: AudioProject) => AudioProject, recordHistory = true) {
     setProject((current) => {
@@ -378,6 +400,56 @@ export default function App() {
 
   function updateTrack(id: string, change: (track: Track) => Track) {
     updateProject((current) => ({ ...current, tracks: current.tracks.map((track) => track.id === id ? change(track) : track) }))
+  }
+
+  function mixAutomationValue(track: Track, lane: AutomationLane) {
+    return isPlaying ? mixAutomationValues[track.id]?.[lane] ?? track[lane] : track[lane]
+  }
+
+  function moveMixControl(track: Track, lane: AutomationLane, value: number) {
+    if (project && engineRef.current.moveAutomationControl(project, track.id, lane, value)) {
+      setMixAutomationValues((values) => ({ ...values, [track.id]: { ...values[track.id], [lane]: value } }))
+    } else updateTrack(track.id, (current) => ({ ...current, [lane]: value }))
+  }
+
+  function releaseMixControl(track: Track, lane: AutomationLane) {
+    if (project) engineRef.current.releaseAutomationControl(project, track.id, lane)
+  }
+
+  function saveAutomationPass(automation: Map<string, TrackAutomation>, current: AudioProject): AudioProject {
+    if (!automation.size) return current
+    const apply = (active: AudioProject): AudioProject => active.id !== current.id ? active : ({
+      ...active,
+      updatedAt: new Date().toISOString(),
+      tracks: active.tracks.map((track) => {
+        const recorded = automation.get(track.id)
+        return recorded ? { ...track, automation: recorded } : track
+      }),
+    })
+    updateProject(apply)
+    return apply(current)
+  }
+
+  async function leavePlayback(current: AudioProject) {
+    const automation = engineRef.current.stop()
+    setIsPlaying(false)
+    const next = saveAutomationPass(automation, current)
+    await projectRepository.saveProject(next)
+    setProjects((items) => [next, ...items.filter((item) => item.id !== next.id)])
+  }
+
+  async function closeProject(current: AudioProject) {
+    if (recordTransition.current) return
+    recordTransition.current = true
+    try {
+      await leavePlayback(current)
+      setProject(undefined)
+      setView('tracks')
+    } catch {
+      setToast({ tone: 'error', text: 'Não foi possível salvar. A sessão continua aberta.' })
+    } finally {
+      recordTransition.current = false
+    }
   }
 
   function updateSend(trackId: string, bus: 'reverb' | 'delay', level: number) {
@@ -490,9 +562,11 @@ export default function App() {
       return
     }
     try {
-      if (project) await projectRepository.saveProject(project)
-      engineRef.current.stop()
-      setIsPlaying(false)
+      if (project) {
+        const automation = engineRef.current.stop()
+        setIsPlaying(false)
+        await projectRepository.saveProject(saveAutomationPass(automation, project))
+      }
       const registration = await navigator.serviceWorker?.getRegistration()
       if (!registration?.waiting) {
         setUpdateReady(false)
@@ -507,6 +581,7 @@ export default function App() {
   }
 
   function undo() {
+    if (isPlaying && project?.tracks.some((track) => isAutomationWriter(track.automation?.mode))) return
     setUndoStack((stack) => {
       const previous = stack.at(-1)
       if (!previous || !project) return stack
@@ -518,6 +593,7 @@ export default function App() {
   }
 
   function redo() {
+    if (isPlaying && project?.tracks.some((track) => isAutomationWriter(track.automation?.mode))) return
     setRedoStack((stack) => {
       const next = stack.at(-1)
       if (!next || !project) return stack
@@ -561,17 +637,27 @@ export default function App() {
     setView('tracks')
   }
 
-  function openProject(next: AudioProject) {
-    engineRef.current.stop()
-    setIsPlaying(false)
-    setIsRecording(false)
-    setProject(next)
-    setSelectedTrackId(next.tracks[0]?.id)
-    setSelectedClipId(next.clips[0]?.id)
-    setPlayhead(0)
-    setUndoStack([])
-    setRedoStack([])
-    setView('tracks')
+  async function openProject(id: string) {
+    if (recordTransition.current) return
+    recordTransition.current = true
+    try {
+      const next = await projectRepository.loadProject(id)
+      if (!next) throw new Error('A sessão já não está no armazenamento local.')
+      engineRef.current.stop()
+      setIsPlaying(false)
+      setIsRecording(false)
+      setProject(next)
+      setSelectedTrackId(next.tracks[0]?.id)
+      setSelectedClipId(next.clips[0]?.id)
+      setPlayhead(0)
+      setUndoStack([])
+      setRedoStack([])
+      setView('tracks')
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível abrir a sessão.' })
+    } finally {
+      recordTransition.current = false
+    }
   }
 
   async function importAudio(event: ChangeEvent<HTMLInputElement>) {
@@ -634,8 +720,7 @@ export default function App() {
       setArchiving('import')
       const restored = await restoreProjectArchive(file)
       await projectRepository.restoreProject(restored.project, restored.assets)
-      engineRef.current.stop()
-      setIsPlaying(false)
+      if (project) await leavePlayback(project)
       setIsRecording(false)
       setProject(restored.project)
       setSelectedTrackId(restored.project.tracks[0]?.id)
@@ -733,7 +818,11 @@ export default function App() {
     setIsStarting(true)
     try {
       const started = await engineRef.current.play(current, (message) => setToast({ tone: 'error', text: message }))
-      if (started) setIsPlaying(true)
+      if (started) {
+        const frame = engineRef.current.getCurrentFrame(current.audioSampleRate)
+        setMixAutomationValues(Object.fromEntries(current.tracks.map((track) => [track.id, engineRef.current.automationControls(track, frame)])))
+        setIsPlaying(true)
+      }
       return started
     } catch (error) {
       setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Falha ao iniciar a reprodução.' })
@@ -749,7 +838,7 @@ export default function App() {
     if (!project) return
     if (!capabilities && !await activateAudio()) return
     if (isPlaying) {
-      engineRef.current.pause(project.audioSampleRate)
+      saveAutomationPass(engineRef.current.pause(project.audioSampleRate), project)
       setIsPlaying(false)
     } else {
       await startPlayback(project)
@@ -1124,7 +1213,7 @@ export default function App() {
     <section className="home-actions"><button className="button primary large" onClick={() => setShowNewProject(true)}><b>＋</b><span>Novo projeto<small>Comece uma nova ideia</small></span></button><button className="button secondary large" onClick={() => fileInputRef.current?.click()}><b>↥</b><span>Importar áudio<small>WAV, MP3 ou formato compatível</small></span></button><button className="button secondary large archive-action" onClick={() => archiveInputRef.current?.click()} disabled={archiving === 'import'}><b>⇩</b><span>{archiving === 'import' ? 'Restaurando backup…' : 'Restaurar backup'}<small>Abra uma cópia independente em .valestudio</small></span></button></section>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
     <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
-    <section className="recent-projects"><div className="section-title"><h2>Projetos recentes</h2><span>{projects.length} local{projects.length === 1 ? '' : 'is'}</span></div>{projects.length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum projeto salvo ainda.</p><small>Crie um projeto para começar a gravar.</small></div> : projects.map((item) => <button className="project-card" key={item.id} onClick={() => openProject(item)}><span className="project-orb">V</span><span><strong>{item.name}</strong><small>{dateLabel(item.updatedAt)} · {item.tracks.length} pista{item.tracks.length === 1 ? '' : 's'} · {item.assets.length} áudio{item.assets.length === 1 ? '' : 's'}</small></span><i>›</i></button>)}</section>
+    <section className="recent-projects"><div className="section-title"><h2>Projetos recentes</h2><span>{projects.length} local{projects.length === 1 ? '' : 'is'}</span></div>{projects.length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum projeto salvo ainda.</p><small>Crie um projeto para começar a gravar.</small></div> : projects.map((item) => <button className="project-card" key={item.id} onClick={() => void openProject(item.id)}><span className="project-orb">V</span><span><strong>{item.name}</strong><small>{dateLabel(item.updatedAt)} · {item.tracks.length} pista{item.tracks.length === 1 ? '' : 's'} · {item.assets.length} áudio{item.assets.length === 1 ? '' : 's'}</small></span><i>›</i></button>)}</section>
     <footer className="home-footer"><span className="status-dot" />Dados locais · {storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados` : 'armazenamento será verificado no dispositivo'}</footer>
     {showNewProject && <NewProjectDialog onCreate={createNewProject} onCancel={() => setShowNewProject(false)} />}{toast && <div className={`toast ${toast.tone}`}>{toast.text}</div>}
   </main>
@@ -1150,8 +1239,8 @@ export default function App() {
   }
 
   return <main className="app-shell studio-shell">
-    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions">{updateReady && <button className="action-chip update-chip" onClick={() => void applyPendingUpdate()} disabled={isRecording} title={isRecording ? 'Finalize o take antes de atualizar' : 'Salvar e aplicar a nova versão'}>{isRecording ? 'Após take' : 'Atualizar'}</button>}<button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; engineRef.current.stop(); setIsPlaying(false); setProject(undefined); setView('tracks') }} aria-label="Voltar aos projetos">⌂</button></div></header>
-    <section className="transport"><button type="button" className="transport-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; engineRef.current.stop(); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div>{desktopRuntime && <label className="transport-buffer">Buffer VST3
+    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions">{updateReady && <button className="action-chip update-chip" onClick={() => void applyPendingUpdate()} disabled={isRecording} title={isRecording ? 'Finalize o take antes de atualizar' : 'Salvar e aplicar a nova versão'}>{isRecording ? 'Após take' : 'Atualizar'}</button>}<button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" disabled={isRecording || asioBusy} onClick={() => void closeProject(project)} aria-label="Voltar aos projetos">⌂</button></div></header>
+    <section className="transport"><button type="button" className="transport-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; saveAutomationPass(engineRef.current.stop(), project); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div>{desktopRuntime && <label className="transport-buffer">Buffer VST3
       <select aria-label="Buffer VST3 em frames" value={bufferFrames} disabled={isPlaying || isRecording || isStarting} onChange={(event) => {
         const value = Number(event.target.value) as NonNullable<AudioProject['vstBufferFrames']>
         updateProject((current) => ({ ...current, vstBufferFrames: value }))
@@ -1358,7 +1447,7 @@ export default function App() {
     {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><h2>Mixer</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><div className="mixer-routing">
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? '＋ Insert VST3'}</button>
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'sends')}>Sends</button>
-    </div><label>Cor da pista<input className="track-color-input" type="color" value={track.color} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, color: event.target.value }))} /></label><div className="fader-bank"><FaderScale /><input aria-label={`Volume de ${track.name}`} className="fader" type="range" min="-60" max="6" step="0.5" value={track.gainDb} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, gainDb: Number(event.target.value) }))} /><TrackMeter value={trackPeaks[track.id]} /></div><output>{dbLabel(track.gainDb)}</output><label>Pan<input type="range" min="-1" max="1" step="0.05" value={track.pan} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, pan: Number(event.target.value) }))} /></label>
+    </div><div className="strip-settings"><AutomationModeSelect mode={track.automation?.mode} disabled={!canEditTimeline} label="Automação" onChange={(mode) => updateTrack(track.id, (item) => ({ ...item, automation: { ...item.automation, mode } }))} /><label>Cor da pista<input className="track-color-input" type="color" value={track.color} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, color: event.target.value }))} /></label></div><div className="fader-bank"><FaderScale /><MixAutomationControl track={track} lane="gainDb" playing={isPlaying} value={mixAutomationValue(track, 'gainDb')} onValue={(value) => moveMixControl(track, 'gainDb', value)} onRelease={() => releaseMixControl(track, 'gainDb')} /><TrackMeter value={trackPeaks[track.id]} /></div><output>{dbLabel(mixAutomationValue(track, 'gainDb'))}</output><label>Pan<MixAutomationControl track={track} lane="pan" playing={isPlaying} value={mixAutomationValue(track, 'pan')} onValue={(value) => moveMixControl(track, 'pan', value)} onRelease={() => releaseMixControl(track, 'pan')} /></label>
         <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
           <small>SENDS</small>
           {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'} value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => updateTrack(track.id, (current) => ({ ...current, sends: { reverb: 0, delay: 0, ...current.sends, [bus]: value / 100 } }))} />)}

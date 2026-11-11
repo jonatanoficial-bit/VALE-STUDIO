@@ -1,8 +1,8 @@
-import type { AudioProject, Clip, MonitorMode, Track } from '../domain/model'
+import type { AudioProject, AutomationLane, Clip, MonitorMode, Track, TrackAutomation } from '../domain/model'
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
-import { scheduleAutomation } from './automation'
+import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
 import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type AsioSettings } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
@@ -21,7 +21,7 @@ type TrackGraph = {
   sends: Record<'reverb' | 'delay', GainNode>
   input?: AudioNode
   instrument?: AudioWorkletNode
-  automationState?: { settings: Track['automation']; muted: boolean }
+  automationState?: { settings: Track['automation']; muted: boolean; values: Partial<Record<AutomationLane, number>> }
 }
 
 type SendBuses = Record<'reverb' | 'delay', AudioNode>
@@ -107,6 +107,7 @@ export class AudioEngine {
   private master?: GainNode
   private assetBuffers = new Map<string, AudioBuffer>()
   private liveGraphs = new Map<string, TrackGraph>()
+  private automationPlayback?: { pass: AutomationPass; rate: number }
   private masterAnalyser?: AnalyserNode
   private liveAuxes = new Map<string, GainNode>()
   private liveAuxMeters = new Map<string, AnalyserNode>()
@@ -407,22 +408,68 @@ export class AudioEngine {
     return { highPass, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
   }
 
-  private applyTrackAutomation(graph: TrackGraph, track: Track, muted: boolean, frame: number, rate: number, at: number): void {
+  private applyTrackAutomation(graph: TrackGraph, track: Track, muted: boolean, frame: number, rate: number, at: number, pass?: AutomationPass): void {
     const automation = track.automation
     const changed = graph.automationState?.settings !== automation || graph.automationState?.muted !== muted
+    const values: Partial<Record<AutomationLane, number>> = {}
     for (const lane of ['gainDb', 'pan'] as const) {
       const isGain = lane === 'gainDb'
       const param = isGain ? graph.fader.gain : graph.panner.pan
       const convert = isGain ? dbToGain : (value: number) => value
-      const points = automation?.mode === 'read' ? automation[lane] : undefined
-      if (points?.length && !(isGain && muted)) {
-        if (changed) scheduleAutomation(param, points, frame, rate, at, convert)
+      const live = pass?.value(track.id, lane)
+      values[lane] = live
+      const previousLive = graph.automationState?.values[lane]
+      const points = automation?.mode !== 'off' ? automation?.[lane] : undefined
+      const hasChanged = changed || live !== previousLive
+      if (live === undefined && points?.length && !(isGain && muted)) {
+        if (hasChanged) scheduleAutomation(param, points, frame, rate, at, convert)
       } else {
-        if (changed) param.cancelScheduledValues(at)
-        param.setTargetAtTime(isGain && muted ? 0 : convert(track[lane]), at, 0.015)
+        if (hasChanged) {
+          if (graph.automationState && typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(at)
+          else param.cancelScheduledValues(at)
+        }
+        param.setTargetAtTime(isGain && muted ? 0 : convert(live ?? track[lane]), at, 0.015)
       }
     }
-    graph.automationState = { settings: automation, muted }
+    graph.automationState = { settings: automation, muted, values }
+  }
+
+  automationControls(track: Track, frame: number): Partial<Record<AutomationLane, number>> {
+    const controls: Partial<Record<AutomationLane, number>> = {}
+    for (const lane of ['gainDb', 'pan'] as const) {
+      const live = this.automationPlayback?.pass.value(track.id, lane)
+      if (live !== undefined) controls[lane] = live
+      else if (track.automation?.mode !== 'off' && track.automation?.[lane]?.length) controls[lane] = automationValueAt(track, lane, frame)
+    }
+    return controls
+  }
+
+  moveAutomationControl(project: AudioProject, trackId: string, lane: AutomationLane, value: number): boolean {
+    const active = this.automationPlayback
+    if (!active || !active.pass.write(trackId, lane, this.getCurrentFrame(active.rate), value)) return false
+    this.refreshAutomation(project, trackId)
+    return true
+  }
+
+  releaseAutomationControl(project: AudioProject, trackId: string, lane: AutomationLane): void {
+    const active = this.automationPlayback
+    if (active?.pass.release(trackId, lane, this.getCurrentFrame(active.rate))) this.refreshAutomation(project, trackId)
+  }
+
+  private refreshAutomation(project: AudioProject, trackId: string): void {
+    const active = this.automationPlayback
+    const track = project.tracks.find((item) => item.id === trackId)
+    const graph = this.liveGraphs.get(trackId)
+    if (!active || !track || !graph || !this.context) return
+    const muted = track.mute || (!track.solo && project.tracks.some((item) => item.solo))
+    this.applyTrackAutomation(graph, track, muted, this.getCurrentFrame(active.rate), active.rate,
+      Math.max(this.context.currentTime, this.playStartedAt), active.pass)
+  }
+
+  private finishAutomation(): Map<string, TrackAutomation> {
+    const active = this.automationPlayback
+    this.automationPlayback = undefined
+    return active?.pass.finish(this.getCurrentFrame(active.rate)) ?? new Map()
   }
 
   private makeAuxBuses(context: BaseAudioContext, project: AudioProject, output: AudioNode, meters?: Map<string, AnalyserNode>): Map<string, GainNode> {
@@ -678,9 +725,11 @@ export class AudioEngine {
     }
     const startAt = context.currentTime + 0.04
     const from = startFrame / project.audioSampleRate
+    const pass = new AutomationPass(project.tracks, startFrame, project.audioSampleRate)
+    this.automationPlayback = { pass, rate: project.audioSampleRate }
     for (const track of project.tracks) {
       const graph = this.liveGraphs.get(track.id)!
-      this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), startFrame, project.audioSampleRate, startAt)
+      this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), startFrame, project.audioSampleRate, startAt, pass)
       if (graph.instrument) graph.instrument.port.postMessage({
         type: 'events',
         events: this.vstEvents(track, project.bpm, from, startAt, context.sampleRate),
@@ -699,18 +748,22 @@ export class AudioEngine {
     return true
   }
 
-  pause(projectRate: number): void {
-    if (!this.playing) return
+  pause(projectRate: number): Map<string, TrackAutomation> {
+    if (!this.playing) return new Map()
+    const automation = this.finishAutomation()
     this.playheadStartFrame = this.getCurrentFrame(projectRate)
     this.stopSources()
     this.playing = false
+    return automation
   }
 
-  stop(): void {
+  stop(): Map<string, TrackAutomation> {
+    const automation = this.finishAutomation()
     this.stopSources()
     this.stopPreview()
     this.playing = false
     this.playheadStartFrame = 0
+    return automation
   }
 
   private stopSources(): void {
@@ -758,7 +811,7 @@ export class AudioEngine {
       graph.reverbGain.gain.setTargetAtTime(track.effects.reverbEnabled ? track.effects.reverbMix : 0, at, 0.015)
       graph.delayGain.gain.setTargetAtTime(track.effects.delayEnabled ? track.effects.delayMix : 0, at, 0.015)
       graph.delay.delayTime.setTargetAtTime(track.effects.delayTime, at, 0.015)
-      if (this.playing) this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), this.getCurrentFrame(project.audioSampleRate), project.audioSampleRate, Math.max(at, this.playStartedAt))
+      if (this.playing) this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), this.getCurrentFrame(project.audioSampleRate), project.audioSampleRate, Math.max(at, this.playStartedAt), this.automationPlayback?.pass)
     })
   }
 

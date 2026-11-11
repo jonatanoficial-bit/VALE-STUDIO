@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import type { AutomationLane, TrackAutomation } from '../domain/model'
+import { AUTOMATION_MODES, type AutomationLane, type AutomationMode, type TrackAutomation } from '../domain/model'
 
 const LIMITS = {
   gainDb: { min: -60, max: 6, step: 0.5, label: 'Volume (dB)' },
@@ -15,6 +15,17 @@ type Props = {
   rate: number
   disabled: boolean
   onChange: (automation: TrackAutomation) => void
+}
+
+export function AutomationModeSelect({ mode, disabled, label = 'Modo', onChange }: {
+  mode?: AutomationMode; disabled: boolean; label?: string; onChange: (mode: AutomationMode) => void
+}) {
+  return <label>{label} <select aria-label={label} value={mode ?? 'off'} disabled={disabled} onChange={(event) => {
+    const value = AUTOMATION_MODES.find((item) => item === event.target.value)
+    if (value) onChange(value)
+  }}>
+    {AUTOMATION_MODES.map((item) => <option value={item} key={item}>{item[0].toUpperCase() + item.slice(1)}</option>)}
+  </select></label>
 }
 
 export function AutomationEditor({ automation, defaults, playhead, frames, rate, disabled, onChange }: Props) {
@@ -40,9 +51,7 @@ export function AutomationEditor({ automation, defaults, playhead, frames, rate,
   return <section className="midi-editor automation-editor" aria-label="Editor de automação">
     <h3>Automação</h3>
     <div className="automation-options">
-      <label>Modo <select value={automation?.mode ?? 'off'} onChange={(event) => onChange({ ...automation, mode: event.target.value === 'read' ? 'read' : 'off' })}>
-        <option value="off">Off</option><option value="read">Read</option>
-      </select></label>
+      <AutomationModeSelect mode={automation?.mode} disabled={disabled} onChange={(mode) => onChange({ ...automation, mode })} />
       <label>Parâmetro <select value={lane} onChange={(event) => {
         setLane(event.target.value === 'pan' ? 'pan' : 'gainDb')
         setPointFrame(undefined)
