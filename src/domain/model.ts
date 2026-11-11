@@ -99,6 +99,7 @@ export type Track = {
 }
 
 export type AudioProject = {
+  markers?: Array<{ id: string; frame: number; name: string }>
   schemaVersion: 1
   id: string
   name: string

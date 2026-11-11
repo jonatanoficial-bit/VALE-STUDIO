@@ -38,6 +38,17 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   const clipIds = identifiers(project.clips as unknown[], 'Lista de clipes')
   const takeIds = identifiers(project.takes as unknown[], 'Lista de takes')
   const archiveAssetIds = identifiers(archive.assets as unknown[], 'Conteúdo de áudios')
+  if (project.markers !== undefined) {
+    if (!Array.isArray(project.markers)) throw new Error('Os marcadores do backup são inválidos.')
+    identifiers(project.markers, 'Lista de marcadores')
+    for (const value of project.markers) {
+      const marker = asRecord(value)
+      if (!marker || typeof marker.name !== 'string' || !marker.name.trim() || marker.name.length > 40
+          || typeof marker.frame !== 'number' || !Number.isSafeInteger(marker.frame) || marker.frame < 0) {
+        throw new Error('Um marcador do backup é inválido.')
+      }
+    }
+  }
   const hasInvalidClip = (project.clips as unknown[]).some((clip) => {
     const item = asRecord(clip)
     return !item || typeof item.assetId !== 'string' || typeof item.trackId !== 'string' || !projectAssetIds.has(item.assetId) || !trackIds.has(item.trackId) || (item.takeId !== undefined && (typeof item.takeId !== 'string' || !takeIds.has(item.takeId)))

@@ -216,6 +216,7 @@ export default function App() {
   const [dropTrackId, setDropTrackId] = useState<string>()
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [snapToBeat, setSnapToBeat] = useState(false)
+  const [rulerMode, setRulerMode] = useState<'time' | 'bars'>('time')
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
   const trackDialog = useRef<HTMLDialogElement>(null)
   const [, setUndoStack] = useState<AudioProject[]>([])
@@ -227,6 +228,7 @@ export default function App() {
     const framesPerBeat = project.audioSampleRate * 60 / project.bpm
     let end = 0
     for (const clip of project.clips) end = Math.max(end, clip.timelineStartFrame + clip.durationFrames)
+    for (const marker of project.markers ?? []) end = Math.max(end, marker.frame)
     for (const track of project.tracks) {
       for (const note of track.midiNotes ?? []) end = Math.max(end, (note.startBeat + note.durationBeats) * framesPerBeat)
     }
@@ -947,13 +949,26 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const element = event.target as HTMLElement
-      if (element.tagName === 'INPUT' || element.tagName === 'SELECT' || element.tagName === 'TEXTAREA') return
-      if (!project) return
-      if (event.code === 'Space') { event.preventDefault(); togglePlayback() }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo() }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo() }
-      if (event.key.toLowerCase() === 'm' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, mute: !track.mute }))
-      if (event.key.toLowerCase() === 's' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, solo: !track.solo }))
+      if (element.closest('input, select, textarea, [contenteditable="true"], dialog') || !project || event.repeat) return
+      const key = event.key.toLowerCase()
+      if (event.ctrlKey || event.metaKey) {
+        if (!['z', 'y', 's', 'e', '=', ' '].includes(key)) return
+        event.preventDefault()
+        if (key === 'z') undo()
+        if (key === 'y') redo()
+        if (key === '=') setView((current) => current === 'mixer' ? 'tracks' : 'mixer')
+        if (key === 'e' && !isPlaying && !isRecording) updateClip('split')
+        if (key === ' ') void toggleRecording()
+        if (key === 's') void projectRepository.saveProject(project).then(
+          () => setToast({ tone: 'success', text: 'Sessão salva.' }),
+          () => setToast({ tone: 'error', text: 'Não foi possível salvar a sessão.' }),
+        )
+        return
+      }
+      if (key === 'f12') { event.preventDefault(); void toggleRecording(); return }
+      if (event.code === 'Space' && !element.closest('button')) { event.preventDefault(); void togglePlayback() }
+      if (key === 'm' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, mute: !track.mute }))
+      if (key === 's' && selectedTrack) updateTrack(selectedTrack.id, (track) => ({ ...track, solo: !track.solo }))
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -977,6 +992,10 @@ export default function App() {
   const bufferFrames = project.vstBufferFrames ?? DEFAULT_VST_BUFFER_FRAMES
   const canEditTimeline = !isRecording && !isPlaying && !isStarting
   const beatFrames = project.audioSampleRate * 60 / project.bpm
+  const [meterBeats, meterUnit] = project.timeSignature.split('/').map(Number)
+  const measuredBarFrames = beatFrames * meterBeats * 4 / meterUnit
+  const barFrames = Number.isFinite(measuredBarFrames) && measuredBarFrames > 0 ? measuredBarFrames : project.audioSampleRate * 2
+  const barStep = Math.max(1, Math.ceil(timelineFrames / barFrames / (timelineZoom * 12)))
 
   function seekTimeline(frame: number) {
     if (!canEditTimeline) return
@@ -1015,6 +1034,15 @@ export default function App() {
       <div className="timeline-tools">
         <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
         <div className="timeline-zoom">
+          <label>Régua <select aria-label="Unidade da régua" value={rulerMode} onChange={(event) => setRulerMode(event.target.value === 'bars' ? 'bars' : 'time')}>
+            <option value="time">Minutos e segundos</option><option value="bars">Compassos</option>
+          </select></label>
+          <label>Compasso <select aria-label="Fórmula de compasso" value={project.timeSignature} disabled={!canEditTimeline} onChange={(event) => {
+            const value = event.target.value as TimeSignature
+            updateProject((current) => ({ ...current, timeSignature: value }))
+          }}>
+            {(['2/4', '3/4', '4/4', '6/8', '12/8'] as const).map((signature) => <option key={signature}>{signature}</option>)}
+          </select></label>
           <Toggle pressed={snapToBeat} label="Grade" onClick={() => setSnapToBeat(!snapToBeat)} />
           <label>Zoom <select aria-label="Zoom horizontal da timeline" value={timelineZoom} onChange={(event) => setTimelineZoom(Number(event.target.value))}>
             <option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8×</option>
@@ -1035,11 +1063,18 @@ export default function App() {
             event.preventDefault()
             seekTimeline(playhead + (event.key === 'ArrowRight' ? beatFrames : -beatFrames))
           }} />
-        {Array.from({ length: timelineZoom * 4 + 1 }, (_, division) => {
+        {rulerMode === 'bars' ? Array.from({ length: Math.floor(timelineFrames / (barFrames * barStep)) + 1 }, (_, index) => {
+          const bar = index * barStep
+          return <span key={bar} style={{ left: `${bar * barFrames / timelineFrames * 100}%` }}>{bar + 1}</span>
+        }) : Array.from({ length: timelineZoom * 4 + 1 }, (_, division) => {
           const fraction = division / (timelineZoom * 4)
           const label = formatDuration(timelineFrames * fraction, project.audioSampleRate)
           return <span key={division} style={{ left: `${fraction * 100}%` }}>{label.replace(/\.0$/, '')}</span>
         })}
+      </div>
+      <div className="marker-lane">
+        {(project.markers ?? []).map((marker) => <button type="button" key={marker.id} disabled={!canEditTimeline}
+          title={marker.name} style={{ left: `${marker.frame / timelineFrames * 100}%` }} onClick={() => seekTimeline(marker.frame)}>{marker.name}</button>)}
       </div>
       {project.tracks.map((track, index) => <article key={track.id} data-track-id={track.id}
         className={`track-row ${selectedTrack?.id === track.id ? 'selected' : ''} ${draggedTrackId === track.id ? 'dragging' : ''} ${dropTrackId === track.id && draggedTrackId !== track.id ? 'track-drop-target' : ''}`}
@@ -1096,7 +1131,27 @@ export default function App() {
       </article>)}
       <div className="playhead-overlay" aria-hidden="true"><i className="lane-playhead" style={{ left: playheadPosition }} /></div>
       </div></div>
-      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button>{(['fadeInFrames', 'fadeOutFrames'] as const).map((field) => <label className="fade-control" key={field}>
+      <form className="marker-form" onSubmit={(event) => {
+        event.preventDefault()
+        if (!canEditTimeline) return
+        const form = event.currentTarget
+        const name = String(new FormData(form).get('name') ?? '').trim()
+        if (!name) return
+        updateProject((current) => ({ ...current, markers: [...(current.markers ?? []), { id: makeId(), frame: playhead, name }] }))
+        form.reset()
+      }}>
+        <input name="name" maxLength={40} required aria-label="Nome do marcador" placeholder="Nome do marcador" />
+        <button className="button secondary" disabled={!canEditTimeline}>＋ Marcador no cursor</button>
+        {project.markers?.some((marker) => marker.frame === playhead) && <button type="button" className="button secondary" disabled={!canEditTimeline}
+          onClick={() => updateProject((current) => ({ ...current, markers: current.markers?.filter((marker) => marker.frame !== playhead) }))}>Remover marcadores no cursor</button>}
+      </form>
+      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button>
+        <label className="fade-control">Ganho do clipe (dB)
+          <input type="number" min={-60} max={12} step={0.5} value={selectedClip.gainDb} disabled={!canEditTimeline} onChange={(event) => {
+            const gain = Math.max(-60, Math.min(12, Number(event.target.value)))
+            updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, gainDb: gain } : clip) }))
+          }} />
+        </label>{(['fadeInFrames', 'fadeOutFrames'] as const).map((field) => <label className="fade-control" key={field}>
           {field === 'fadeInFrames' ? 'Entrada (ms)' : 'Saída (ms)'}
           <input type="number" min={0} max={Math.floor(selectedClip.durationFrames / 2 / project.audioSampleRate * 1000)} value={Math.round(selectedClip[field] / project.audioSampleRate * 1000)} onChange={(event) => {
             const frames = Math.round(Number(event.target.value) * project.audioSampleRate / 1000)
