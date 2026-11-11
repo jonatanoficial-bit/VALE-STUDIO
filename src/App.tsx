@@ -42,8 +42,8 @@ function dbLabel(value: number): string {
 }
 
 function meterPercent(value?: number): number {
-  if (!value || value <= 0) return 2
-  return Math.max(2, Math.min(100, (gainToDb(value) + 60) / 60 * 100))
+  if (!value || value <= 0) return 0
+  return Math.max(0, Math.min(100, (gainToDb(value) + 60) / 60 * 100))
 }
 
 function safeFilePart(value: string, fallback: string): string {

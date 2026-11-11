@@ -319,7 +319,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .timeline-grid .track-toggles .tiny-toggle, .timeline-grid .track-routing .tiny-toggle { min-height: 20px; padding: 2px 5px; }
   .mixer-strip-scroll { gap: 3px; }
   .mixer-strip-scroll .channel-strip {
-    display: grid; grid-template-rows: 13px 19px 58px 39px 162px 16px 34px 94px 24px;
+    display: grid; grid-template-rows: 13px 19px 58px 39px 162px 16px 34px 116px 24px;
     justify-items: center; align-items: center; gap: 4px; min-width: 125px; padding: 11px 8px; border-radius: 5px;
   }
   .mixer-strip-scroll .channel-strip > .track-color { grid-row: 1; height: 4px; width: 78%; }
