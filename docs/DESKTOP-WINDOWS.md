@@ -10,9 +10,9 @@ Esta pasta adiciona uma edição desktop ao Vale Studio web. Ela não substitui 
 - retorna nome, fabricante, versão, class ID e caminho do bundle;
 - encerra o scan após 25 segundos se ele travar.
 
-Em **Mixer → Inserts**, escolha o plug-in e inicie a reprodução. Para instrumentos, crie uma pista MIDI e adicione o instrumento ao primeiro slot. Abra **Editor** durante a reprodução para escolher o timbre no próprio plug-in. O processamento usa a saída principal estéreo do plug-in. Pare a reprodução para alterar a ordem, o bypass ou o tamanho do bloco dos inserts.
+Abra **Inserts** no cabeçalho da pista ou no mixer. Busque pelo nome do plug-in, insira e inicie a reprodução. Para instrumentos, use o primeiro slot de uma pista MIDI. Abra **Editor** durante a reprodução para escolher o timbre. Em **Sends**, ajuste o nível enviado aos retornos compartilhados de reverb e delay.
 
-O controle de buffer configura os blocos dos VST3. A latência também depende do WebView2, do driver e dos plug-ins. O estado do componente fica no perfil local do Windows. Backups do projeto ainda não levam esse estado local para outro PC.
+O controle **Buffer VST3** fica no transporte e ajusta o tamanho dos blocos com a reprodução parada. O padrão é 512 frames em sessões sem ajuste salvo. A estimativa ao lado mostra a espera da fila por insert. A entrada e a saída física continuam no WebView2, e esta versão ainda não conecta ao ASIO4ALL. O estado do componente fica no perfil local do Windows e ainda não acompanha backups entre computadores.
 
 Para testar o retorno de áudio de um plug-in instalado, rode `node scripts/check-vst-stream.mjs "<caminho do módulo>" effect`. Para um instrumento que já inicia com um timbre carregado, troque `effect` por `instrument`.
 

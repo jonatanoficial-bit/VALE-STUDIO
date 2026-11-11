@@ -1,5 +1,6 @@
 export type TimeSignature = '2/4' | '3/4' | '4/4' | '6/8' | '12/8'
 export type MonitorMode = 'off' | 'software' | 'direct'
+export const DEFAULT_VST_BUFFER_FRAMES = 512
 
 export type EffectSettings = {
   highPassEnabled: boolean

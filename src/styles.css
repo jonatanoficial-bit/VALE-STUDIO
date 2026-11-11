@@ -175,6 +175,26 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .midi-panel { margin: 18px clamp(14px, 3vw, 27px); padding: 17px; display: flex; justify-content: space-between; align-items: center; gap: 18px; border: 1px solid #315d7c; border-radius: 16px; background: radial-gradient(circle at 92% 0%, #a855f724, transparent 30%), #091827; }
 .midi-panel h3 { margin: 5px 0; font-size: 17px; }.midi-panel p { max-width: 610px; margin: 0; color: #90aac1; font-size: 11px; line-height: 1.5; }.midi-controls { display: grid; gap: 8px; min-width: 240px; }.midi-controls select { padding: 10px; color: #dff5ff; background: #071422; border: 1px solid #30536e; border-radius: 9px; }.midi-controls small { color: #7897ae; font-size: 10px; line-height: 1.4; }
 @keyframes live-wave { 50% { filter: brightness(1.3); } }
+.timeline-zoom { display: flex; align-items: center; gap: 8px; color: #b3ccde; font-size: 11px; white-space: nowrap; }
+.timeline-zoom select { color: #dff5ff; background: #102336; border: 1px solid #345977; border-radius: 5px; padding: 4px; }
+.timeline-viewport { overflow-x: auto; border: 1px solid #294258; border-radius: 8px; }
+.timeline-grid { --track-header-width: 148px; position: relative; width: calc(var(--timeline-zoom, 1) * 100%); }
+.timeline-grid .track-row { grid-template-columns: var(--track-header-width) minmax(0, 1fr); }
+.timeline-grid .track-head { position: sticky; left: 0; z-index: 6; background: #142333; padding-left: 5px; border-right: 1px solid #304960; }
+.timeline-grid .track-row.selected .track-head { background: #1c3448; }
+.timeline-grid .track-drop-target .track-head { box-shadow: inset 0 2px #61d3fb; }
+.timeline-grid .ruler { margin-left: var(--track-header-width); background: #192939; color: #c0d1de; }
+.timeline-grid .ruler > span { top: 5px; pointer-events: none; }
+.timeline-grid .ruler > span:nth-child(2) { transform: translateX(4px); }
+.timeline-grid .ruler > span:last-child { transform: translateX(calc(-100% - 4px)); }
+.ruler-seek { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: crosshair; }
+.playhead-overlay { position: absolute; inset: 0 0 0 var(--track-header-width); z-index: 5; pointer-events: none; }
+.playhead-overlay .lane-playhead::before { content: ""; position: absolute; top: 0; left: -4px; border: 4px solid transparent; border-top-color: #81dcff; }
+.timeline-grid .clip-lane .live-wave { position: absolute; }
+.timeline-grid .audio-clip .waveform { width: calc(100% - 6px); height: calc(100% - 16px); }
+@media (min-width: 840px) { .timeline-grid { --track-header-width: 196px; } }
+@media (min-width: 1100px) { .timeline-grid { --track-header-width: 224px; } }
+@media (max-width: 540px) { .timeline-grid { --track-header-width: 132px; } }
 @media (max-width: 540px) { .midi-panel { margin: 14px; display: grid; }.midi-controls { min-width: 0; }.live-wave { width: 60%; } }
 .channel-strip .track-color-input { width: 36px; height: 26px; padding: 1px; border: 1px solid var(--line); background: transparent; border-radius: 5px; }
 .channel-sends { align-self: stretch; padding: 8px 0; border-block: 1px solid var(--line); }
@@ -183,3 +203,50 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .master-strip { border-color: #3183b2; }
 .fade-control { flex: 0 0 auto; display: grid; gap: 4px; font-size: 10px; color: var(--muted); }
 .fade-control input { width: 78px; color: inherit; background: var(--surface-0); border: 1px solid var(--line); border-radius: 5px; padding: 3px; }
+.transport-buffer { display: grid; gap: 2px; margin-inline-start: auto; color: #afc8da; font-size: 10px; }
+.transport-buffer select, .plugin-picker input { padding: 6px 8px; color: #dff5ff; background: #09192a; border: 1px solid #345977; border-radius: 8px; }
+.transport-buffer small { color: #81a8c4; font-size: 9px; }
+.transport-buffer + .metro-button { margin-inline-start: 0; }
+.recording-desk { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; padding: 16px; border: 1px solid #2c4c65; border-radius: 13px; background: #102336; }
+.recording-desk-active { border-color: #e05063; background: #291c2a; }
+.recording-desk-title { flex: 1 1 140px; min-width: 0; }
+.recording-desk-title h2 { margin: 3px 0; font-size: 19px; overflow-wrap: anywhere; }
+.recording-desk-title small, .recording-desk-title span, .recording-input, .timeline-tools > span { color: #a6bed0; font-size: 11px; }
+.recording-desk-active .recording-desk-title small { color: #ff9ea6; }
+.recording-input { display: grid; gap: 5px; }
+.recording-input meter { width: 110px; }
+.recording-controls, .mixer-routing { display: flex; flex-wrap: wrap; gap: 6px; }
+.record-action { color: #fff; background: #aa2a44; border-color: #ed6475; }
+.timeline-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.track-area .timeline-tools .track-area-actions { margin: 0; padding: 12px 0; flex-wrap: wrap; }
+.track-area .ruler { position: relative; padding: 0; display: block; height: 24px; }
+.ruler > span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.ruler > span:first-child { transform: none; }
+.ruler > span:nth-child(5) { transform: translateX(-100%); }
+.lane-playhead { position: absolute; top: 0; bottom: 0; z-index: 4; width: 1px; background: #54d5ff; box-shadow: 0 0 7px #17bfff; pointer-events: none; }
+.track-area .track-row { background-image: none; }
+.track-area .track-head { grid-template-columns: 21px minmax(0, 1fr) 7px; align-content: center; }
+.track-handle { width: 21px; height: 29px; padding: 0; background: #14283b; border: 1px solid #274158; border-radius: 5px; cursor: grab; touch-action: none; }
+.track-handle:active, .audio-clip.clip-moving { cursor: grabbing; }
+.track-routing { grid-column: 2 / -1; display: flex; gap: 4px; }
+.track-area .clip-lane { background: repeating-linear-gradient(90deg, #30465a55 0 1px, transparent 1px 25%); }
+.clip-lane .audio-clip { touch-action: pan-y; cursor: grab; min-width: 5px; }
+.clip-lane .live-wave { position: absolute; min-width: 5px; z-index: 3; pointer-events: none; }
+.mixer-routing { width: 100%; }
+.mixer-routing .button { flex: 1 0 100%; min-height: 35px; padding: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-dialog { width: min(650px, calc(100vw - 28px)); max-height: calc(100dvh - 36px); color: #e8f6ff; background: #101f2e; border: 1px solid #3a5a72; border-radius: 15px; padding: 20px; box-shadow: 0 20px 65px #000b; }
+.routing-dialog::backdrop { background: #020913b8; }
+.routing-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.routing-dialog h2 { margin: 2px 0; font-size: 22px; }
+.routing-dialog p, .routing-dialog header small { color: #b0c5d6; font-size: 12px; }
+.routing-dialog .plugin-picker { display: grid; gap: 8px; }
+.routing-dialog .vst3-picker-actions select { flex: 1; min-width: 0; max-width: none; }
+.routing-dialog .vst3-insert-rack { margin: 12px 0 0; }
+.routing-dialog .routing-status.error { color: #ffb5ba; }
+@media (max-width: 540px) {
+  .recording-controls { width: 100%; }
+  .recording-controls .button { min-height: 36px; padding: 6px 10px; }
+  .track-area .track-head { grid-template-columns: 17px minmax(0, 1fr) 5px; }
+  .track-handle { width: 17px; }
+  .transport-buffer select { max-width: 84px; }
+}

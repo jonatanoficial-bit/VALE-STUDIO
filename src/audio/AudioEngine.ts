@@ -1,5 +1,5 @@
 import type { AudioProject, Clip, MonitorMode, Track } from '../domain/model'
-import { dbToGain } from '../domain/model'
+import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
 import { isDesktopRuntime, openVstStream } from '../platform/desktop'
@@ -281,6 +281,13 @@ export class AudioEngine {
     return Math.max(this.playheadStartFrame, this.playheadStartFrame + Math.round((this.context.currentTime - this.playStartedAt) * projectRate))
   }
 
+  seek(frame: number): boolean {
+    if (this.playing || this.isRecording || !Number.isFinite(frame)) return false
+    this.stopPreview()
+    this.playheadStartFrame = Math.max(0, Math.round(frame))
+    return true
+  }
+
   startMetronome(bpm: number, beatsPerBar: number): void {
     if (!this.context || this.metronomeTimer) return
     this.metronomeNextBeat = this.context.currentTime + 0.04
@@ -467,7 +474,7 @@ export class AudioEngine {
     })
     await this.vstWorklet
     if (generation !== this.playGeneration) throw new Error('Reprodução cancelada.')
-    const frames = project.vstBufferFrames ?? 1024
+    const frames = project.vstBufferFrames ?? DEFAULT_VST_BUFFER_FRAMES
     let tail: AudioNode | undefined
     for (const insert of inserts) {
       const instrument = insert.kind === 'instrument'
@@ -890,7 +897,7 @@ export class AudioEngine {
     const buffer = await dry.startRendering()
     const left = buffer.getChannelData(0)
     const right = buffer.getChannelData(1)
-    const frames = project.vstBufferFrames ?? 1024
+    const frames = project.vstBufferFrames ?? DEFAULT_VST_BUFFER_FRAMES
     for (const insert of inserts) {
       const notes = insert.kind === 'instrument' ? this.vstEvents(track, project.bpm, 0, 0, offline.sampleRate) : []
       const stream = await openVstStream(insert, frames, offline.sampleRate, project.bpm)
