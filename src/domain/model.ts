@@ -73,6 +73,7 @@ export type Clip = {
   fadeInFrames: number
   fadeOutFrames: number
   takeId?: string
+  compSegment?: true
 }
 
 export type Take = {
@@ -109,6 +110,7 @@ export type Track = {
   midiNotes?: MidiNote[]
   clipIds: string[]
   takeIds: string[]
+  compEnabled?: boolean
 }
 
 export type AudioProject = {

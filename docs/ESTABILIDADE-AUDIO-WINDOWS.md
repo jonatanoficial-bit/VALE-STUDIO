@@ -6,7 +6,7 @@ A prioridade da entrega Windows é reproduzir e gravar continuamente com pelo me
 
 - **Interface e persistência.** React e TypeScript no WebView2, empacotados pelo Tauri. Sessões e checkpoints PCM ficam no armazenamento local. A captura atual usa Web Audio e AudioWorklet, com seleção de entrada e formato mono ou estéreo por pista.
 - **Plugins.** O host VST3 em C++ opera em processo separado. O controle Buffer VST3 configura os blocos da ponte de plugins. O buffer do dispositivo físico é outro ajuste.
-- **Áudio nativo.** O protótipo C++ em `native/asio-host` usa o SDK ASIO. A integração Rust em `src-tauri/src/asio_monitor.rs` abre um executável de desenvolvimento via `VALE_ASIO_HOST_PATH` e seleciona o ASIO4ALL. O protótipo cobre captura e retorno seco. A reprodução da sessão pelo mesmo fluxo, a seleção de drivers do fabricante na interface e os backends WASAPI selecionáveis ainda precisam de implementação.
+- **Áudio nativo.** O host WASAPI Shared em `native/wasapi-host` lista os endpoints e oferece captura PCM por entrada e reprodução da mixagem renderizada na saída escolhida. A sessão, os checkpoints e a reprodução normal pelo WebView2 continuam disponíveis. O protótipo ASIO4ALL permanece habilitável por `VALE_ASIO_HOST_PATH`. A mixagem interativa e o overdub no mesmo relógio nativo, WASAPI Exclusive e a seleção de ASIO do fabricante seguem pendentes.
 
 ## Seleção de driver e buffer
 
@@ -43,3 +43,11 @@ Registrar por execução o Windows, driver, dispositivos, formato negociado, buf
 O host detectou dois canais de entrada e saída do Bluetooth M10 em modo Hands-Free a 8 kHz. A consulta a 44,1 e 48 kHz recebeu `ASE_NoClock`. Em 8 kHz, o driver retornou sucesso ao iniciar, mas entregou zero callbacks com buffers de 256, 512 e 1024 frames. O autoteste sintético do host confirmou a cópia de amostras e o retorno mono e estéreo. Os testes localizam a falha antes da entrega de áudio pelo driver nessa configuração. A causa interna do driver permanece indeterminada.
 
 O diagnóstico inicial fica encerrado com esse resultado. Para uma configuração de hardware diferente, limitar nova investigação do ASIO4ALL a duas tentativas fundamentadas e priorizar os outros backends após registrar o resultado.
+
+## Primeira verificação do WASAPI Shared
+
+A captura no TEYUN Q26 entregou 73.440 frames em mono e 71.040 em estéreo a 48 kHz, com período de 480 frames e buffer de 1.056 frames. Em loopback pelo cabo virtual, o host reproduziu um sinal estéreo de dois segundos a 48 kHz e capturou a 44,1 kHz. O RMS medido foi 0,0892 à esquerda e 0,0223 à direita, compatível com a razão de 4:1 do sinal enviado.
+
+O diagnóstico de saída manteve o fluxo de silêncio por 300 segundos, a 48 kHz, com período de 480 e buffer de 1.056 frames. Foram observados 30.002 eventos e um evento com preenchimento zero. Esse contador descreve o preenchimento do buffer. A medição completa de XRUNs, a reprodução audível de cinco minutos e os testes físicos de desconexão e overdub seguem pendentes.
+
+No app, **Áudio nativo · WASAPI Shared** lista entradas e saídas com o formato do modo compartilhado. A captura funciona com o transporte parado. Ao armar exatamente duas pistas mono, é possível encaminhar dois canais consecutivos da mesma interface a dois takes sincronizados, com checkpoints e gravação final em transações conjuntas. A saída WASAPI toca a mixagem renderizada no dispositivo selecionado.

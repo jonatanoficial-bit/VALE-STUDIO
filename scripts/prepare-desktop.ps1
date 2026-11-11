@@ -48,3 +48,13 @@ if (-not (Test-Path $hostBinary)) {
   throw "A compilação terminou sem gerar $hostBinary."
 }
 Write-Output "Host VST3 pronto: $hostBinary"
+
+$audioSource = Join-Path $root 'native\wasapi-host'
+$audioBuild = Join-Path $root 'work\wasapi-host-build'
+cmake -S $audioSource -B $audioBuild -G $generator -A x64
+if ($LASTEXITCODE -ne 0) { throw 'O CMake não conseguiu configurar o host WASAPI.' }
+cmake --build $audioBuild --config Release --target wasapi-host
+if ($LASTEXITCODE -ne 0) { throw 'O CMake não conseguiu compilar o host WASAPI.' }
+if (-not (Test-Path (Join-Path $audioSource 'dist\wasapi-host.exe'))) {
+  throw 'A compilação terminou sem gerar wasapi-host.exe.'
+}

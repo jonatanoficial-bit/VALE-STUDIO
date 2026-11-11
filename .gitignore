@@ -3,6 +3,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 native/vst3-host/dist/
+native/wasapi-host/dist/
 .env
 .env.*
 work/

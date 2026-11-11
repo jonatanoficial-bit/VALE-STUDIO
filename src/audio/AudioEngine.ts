@@ -1,9 +1,10 @@
 import type { AudioProject, AutomationLane, Clip, MonitorMode, Track, TrackAutomation } from '../domain/model'
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
+import { clipIsAudible } from '../domain/comp'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
-import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type AsioSettings } from '../platform/desktop'
+import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type NativeCaptureSettings } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
 type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; showEditor: () => void }
@@ -68,6 +69,8 @@ export type RecordingPcmChunk = {
 
 export type RecordingStart = {
   inputSettings?: MediaTrackSettings
+  periodFrames?: number
+  bufferFrames?: number
   startFrame: number
 }
 
@@ -572,11 +575,6 @@ export class AudioEngine {
     this.sources.add(source)
   }
 
-  private shouldPlayClip(project: AudioProject, clip: Clip): boolean {
-    if (!clip.takeId) return true
-    const take = project.takes.find((candidate) => candidate.id === clip.takeId)
-    return !take || take.selected
-  }
 
   private async prepareVstRack(context: AudioContext, project: AudioProject, track: Track, graph: TrackGraph, onError: (message: string) => void): Promise<number> {
     const inserts = (track.vst3Inserts ?? []).filter((insert) => !insert.bypass)
@@ -738,7 +736,7 @@ export class AudioEngine {
     }
 
     for (const clip of project.clips) {
-      if (!this.shouldPlayClip(project, clip)) continue
+      if (!clipIsAudible(project, clip)) continue
       const buffer = this.assetBuffers.get(clip.assetId)
       const graph = this.liveGraphs.get(clip.trackId)
       if (buffer && graph) this.createSource(buffer, graph, project.audioSampleRate, clip, startFrame, startAt)
@@ -949,7 +947,7 @@ export class AudioEngine {
     this.inputMeter = { peak, rms: Math.sqrt(energy / pcm.length) }
   }
 
-  async startAsioRecording(trackId: string, projectRate: number, settings: AsioSettings, dryReturn: boolean, channels: 1 | 2,
+  async startAsioRecording(trackId: string, projectRate: number, settings: NativeCaptureSettings, dryReturn: boolean, channels: 1 | 2,
     onPcmChunk: (chunk: RecordingPcmChunk) => Promise<void>, onFailure: (reason: string) => void): Promise<RecordingStart> {
     if (!this.context || this.playing || this.recordingTrackId) throw new Error('Pare o transporte antes de gravar pelo ASIO.')
     const info = await startAsioMonitor({ ...settings, capture: true, dryReturn, channels })
@@ -965,7 +963,7 @@ export class AudioEngine {
       if (capture.stopping) return
       capture.pending = readAsioCapture().then((packet) => {
         this.acceptRecordingPcm(Float32Array.from(packet.samples))
-        if (packet.error || packet.ended) throw new Error(packet.error ?? 'O driver ASIO interrompeu a captura.')
+        if (packet.error || packet.ended) throw new Error(packet.error ?? 'O driver nativo interrompeu a captura.')
       }).catch((error) => {
         capture.error = String(error)
         if (!capture.stopping) onFailure(capture.error)
@@ -974,7 +972,7 @@ export class AudioEngine {
       })
     }
     capture.timer = window.setTimeout(poll, 80)
-    return { startFrame: this.recordingStartFrame }
+    return { startFrame: this.recordingStartFrame, periodFrames: info.frames, bufferFrames: info.bufferFrames }
   }
 
   setMonitorMode(mode: MonitorMode): void {
@@ -1088,7 +1086,8 @@ export class AudioEngine {
   }
 
   private renderLength(project: AudioProject): number {
-    const lastFrame = project.clips.reduce((maximum, clip) => Math.max(maximum, clip.timelineStartFrame + clip.durationFrames), 0)
+    const lastFrame = project.clips.reduce((maximum, clip) =>
+      clipIsAudible(project, clip) ? Math.max(maximum, clip.timelineStartFrame + clip.durationFrames) : maximum, 0)
     let lastMidiFrame = 0
     for (const track of project.tracks) {
       if (track.kind !== 'midi') continue
@@ -1114,7 +1113,7 @@ export class AudioEngine {
   }
 
   private async scheduleRenderTrack(offline: OfflineAudioContext, project: AudioProject, track: Track, graph: TrackGraph): Promise<void> {
-    const clips = project.clips.filter((clip) => clip.trackId === track.id && this.shouldPlayClip(project, clip))
+    const clips = project.clips.filter((clip) => clip.trackId === track.id && clipIsAudible(project, clip))
     const inserts = (track.vst3Inserts ?? []).filter((insert) => !insert.bypass)
     if (!inserts.length) {
       for (const clip of clips) this.scheduleRenderClip(offline, project, clip, graph.highPass)
@@ -1217,7 +1216,7 @@ export class AudioEngine {
   }
 
   async exportStems(project: AudioProject): Promise<StemExport[]> {
-    const tracksWithAudio = project.tracks.filter((track) => project.clips.some((clip) => clip.trackId === track.id && this.shouldPlayClip(project, clip)))
+    const tracksWithAudio = project.tracks.filter((track) => project.clips.some((clip) => clip.trackId === track.id && clipIsAudible(project, clip)))
     const stems: StemExport[] = []
     for (const track of tracksWithAudio) {
       const buffer = await this.renderStem(project, track.id)

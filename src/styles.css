@@ -315,6 +315,11 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .strip-toggles { display: flex; gap: 4px; flex-wrap: wrap; }
 .strip-settings { display: flex; justify-content: space-between; align-items: end; gap: 6px; }
 .strip-settings select { width: 60px; font-size: 10px; }
+.comp-region fieldset { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; border: 0; padding: 6px 0; }
+.comp-region label { display: grid; font-size: 11px; }
+.comp-region input { width: 95px; }
+.toast { pointer-events: none; }
+.toast button { pointer-events: auto; }
 @media (min-width: 840px) {
   .timeline-grid .track-row { min-height: 77px; }
   .timeline-grid .track-head { padding: 4px 8px; gap: 3px 6px; }

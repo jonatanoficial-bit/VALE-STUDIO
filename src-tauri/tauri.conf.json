@@ -37,7 +37,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../native/vst3-host/dist/vst3-host.exe": "vst3-host.exe"
+      "../native/vst3-host/dist/vst3-host.exe": "vst3-host.exe",
+      "../native/wasapi-host/dist/wasapi-host.exe": "wasapi-host.exe"
     },
     "windows": {
       "nsis": { "installMode": "currentUser" }

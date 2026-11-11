@@ -18,7 +18,7 @@ export type Vst3ProbeResult = {
 }
 
 type TauriCore = {
-  invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T>
+  invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array, options?: { headers: Record<string, string> }): Promise<T>
 }
 
 type TauriWindow = Window & {
@@ -59,6 +59,7 @@ export async function probeVst3Plugin(plugin: Pick<Vst3Plugin, 'bundlePath' | 'c
 
 export type AsioMonitorInfo = {
   frames: number
+  bufferFrames?: number
   channels: number
   sampleRate: number
   inputLatency: number
@@ -69,10 +70,36 @@ export async function asioMonitorAvailable(): Promise<boolean> {
   return await nativeCore()?.invoke<boolean>('asio_monitor_available') ?? false
 }
 
-export type AsioSettings = { frames: number; sampleRate: number; input: number; output: number }
+export type AsioSettings = { backend?: 'asio'; frames: number; sampleRate: number; input: number; output: number }
+export type WasapiCaptureSettings = { backend: 'wasapi'; frames: number; sampleRate: number; input: number; output: 0; inputDeviceId: string }
+export type NativeCaptureSettings = AsioSettings | WasapiCaptureSettings
+export type WasapiDevice = {
+  id: string; name: string; flow: 'input' | 'output'; sampleRate: number; channels: number
+  standard: number; minimum: number; maximum: number; fundamental: number
+}
+
+export async function listWasapiDevices(): Promise<WasapiDevice[]> {
+  return await nativeCore()?.invoke<WasapiDevice[]>('wasapi_devices') ?? []
+}
+
+export async function playWasapiPcm(device: WasapiDevice, frames: number, bytes: ArrayBuffer): Promise<void> {
+  const core = nativeCore()
+  if (!core) throw new Error('A saída WASAPI exige o Vale Studio Desktop.')
+  await core.invoke('play_wasapi_pcm', new Uint8Array(bytes), { headers: {
+    'x-device-id': device.id, 'x-period': String(frames), 'x-sample-rate': String(device.sampleRate),
+  } })
+}
+
+export async function wasapiOutputRunning(): Promise<boolean> {
+  return await nativeCore()?.invoke<boolean>('wasapi_output_running') ?? false
+}
+
+export async function stopWasapiOutput(): Promise<void> {
+  await nativeCore()?.invoke('stop_wasapi_output')
+}
 export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string }
 
-export async function startAsioMonitor(settings: AsioSettings & { capture?: boolean; dryReturn?: boolean; channels?: 1 | 2 }): Promise<AsioMonitorInfo> {
+export async function startAsioMonitor(settings: NativeCaptureSettings & { capture?: boolean; dryReturn?: boolean; channels?: 1 | 2 }): Promise<AsioMonitorInfo> {
   const core = nativeCore()
   if (!core) throw new Error('O retorno ASIO exige o Vale Studio Desktop.')
   return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)

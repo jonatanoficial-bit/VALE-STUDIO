@@ -48,7 +48,8 @@ test('preview e render usam a mesma linha de tempo por frames, com fades não de
 test('a seleção de take controla preview e render sem apagar versões alternativas', async () => {
   const engine = await read('src/audio/AudioEngine.ts')
   const app = await read('src/App.tsx')
-  assert.match(engine, /private shouldPlayClip/)
+  assert.match(engine, /if \(!clipIsAudible\(project, clip\)\) continue/)
+  assert.match(engine, /clip\.trackId === track\.id && clipIsAudible\(project, clip\)/)
   assert.match(engine, /previewAsset\(id: string/)
   assert.match(app, /function selectTake/)
   assert.match(app, /GERENCIAMENTO DE TAKES/)

@@ -161,24 +161,32 @@ export const projectRepository = {
   },
 
   async appendTakeDraftChunk(chunk: TakeDraftChunk): Promise<void> {
+    return this.appendTakeDraftChunks([chunk])
+  },
+
+  async appendTakeDraftChunks(chunks: TakeDraftChunk[]): Promise<void> {
     const database = await openDatabase()
     const transaction = database.transaction([TAKE_DRAFT_STORE, TAKE_CHUNK_STORE], 'readwrite')
     const drafts = transaction.objectStore(TAKE_DRAFT_STORE)
-    const draft = await requestResult(drafts.get(chunk.draftId)) as TakeDraft | undefined
-    if (!draft) {
-      transaction.abort()
+    const saved = transactionComplete(transaction)
+    try {
+      const current = await Promise.all(chunks.map((chunk) => requestResult(drafts.get(chunk.draftId)) as Promise<TakeDraft | undefined>))
+      for (const [index, chunk] of chunks.entries()) {
+        const draft = current[index]
+        if (!draft || draft.channels !== chunk.channels || draft.persistedFrames !== chunk.firstFrame || draft.persistedChunks !== chunk.sequence) {
+          throw new Error('O checkpoint PCM não corresponde à sequência do rascunho.')
+        }
+        transaction.objectStore(TAKE_CHUNK_STORE).put(chunk)
+        drafts.put({ ...draft, persistedFrames: draft.persistedFrames + chunk.frameCount, persistedChunks: draft.persistedChunks + 1, updatedAt: new Date().toISOString() })
+      }
+      await saved
+    } catch (error) {
+      try { transaction.abort() } catch { /* A transação pode já ter sido encerrada. */ }
+      await saved.catch(() => undefined)
+      throw error
+    } finally {
       database.close()
-      throw new Error('O rascunho da gravação não está mais disponível.')
     }
-    transaction.objectStore(TAKE_CHUNK_STORE).put(chunk)
-    drafts.put({
-      ...draft,
-      persistedFrames: draft.persistedFrames + chunk.frameCount,
-      persistedChunks: draft.persistedChunks + 1,
-      updatedAt: new Date().toISOString(),
-    })
-    await transactionComplete(transaction)
-    database.close()
   },
 
   async listTakeDrafts(projectId: string): Promise<TakeDraft[]> {
@@ -218,12 +226,18 @@ export const projectRepository = {
   },
 
   async commitTake(project: AudioProject, asset: MediaAsset, blob: Blob, draftId: string): Promise<void> {
+    return this.commitTakes(project, [{ asset, blob, draftId }])
+  },
+
+  async commitTakes(project: AudioProject, takes: Array<{ asset: MediaAsset; blob: Blob; draftId: string }>): Promise<void> {
     const database = await openDatabase()
     const transaction = database.transaction([PROJECT_STORE, ASSET_STORE, TAKE_DRAFT_STORE, TAKE_CHUNK_STORE], 'readwrite')
-    transaction.objectStore(ASSET_STORE).put({ id: asset.id, blob } satisfies StoredAsset)
+    for (const { asset, blob, draftId } of takes) {
+      transaction.objectStore(ASSET_STORE).put({ id: asset.id, blob } satisfies StoredAsset)
+      transaction.objectStore(TAKE_DRAFT_STORE).delete(draftId)
+    }
     transaction.objectStore(PROJECT_STORE).put({ ...project, updatedAt: new Date().toISOString() })
-    transaction.objectStore(TAKE_DRAFT_STORE).delete(draftId)
-    await deleteDraftChunks(transaction, draftId)
+    await Promise.all(takes.map(({ draftId }) => deleteDraftChunks(transaction, draftId)))
     await transactionComplete(transaction)
     database.close()
   },
