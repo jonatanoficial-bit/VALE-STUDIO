@@ -27,6 +27,8 @@ Tauri depende de Rust, Microsoft C++ Build Tools e WebView2 no Windows. O SDK VS
 
 ## Preparar e gerar o instalador
 
+Os critérios de áudio e a ordem de preferência dos drivers para a entrega estão em [Estabilidade do áudio no Windows](ESTABILIDADE-AUDIO-WINDOWS.md).
+
 ```powershell
 pnpm install --frozen-lockfile
 pnpm desktop:doctor
