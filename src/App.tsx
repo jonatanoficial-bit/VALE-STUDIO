@@ -2,15 +2,19 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
 import type { AsioSettings } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
+import { AudioInputSelect } from './audio/AudioInputSelect'
+import { AutomationEditor } from './audio/AutomationEditor'
+import { AuxRouting } from './audio/AuxRouting'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
-import type { AudioProject, Clip, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
+import type { AudioProject, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, Vst3Insert } from './domain/model'
 import { createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
 import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanDefaultVst3Directories, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
 import { MidiInput, type MidiDevice, type MidiMessage } from './midi/MidiInput'
+import { MidiEditor } from './midi/MidiEditor'
 import { PWA_SERVICE_WORKER_AVAILABLE, SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
@@ -70,22 +74,31 @@ function mergeVst3Plugins(current: Vst3Plugin[], incoming: Vst3Plugin[]): Vst3Pl
 }
 
 function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
-  const points = peaks.map((peak, index) => {
-    const x = peaks.length === 1 ? 50 : index / (peaks.length - 1) * 100
-    const height = Math.max(2, peak * 43)
-    return `${x.toFixed(2)},${50 - height} ${x.toFixed(2)},${50 + height}`
-  }).join(' ')
+  const samples = peaks.length < 2 ? [peaks[0] ?? 0, peaks[0] ?? 0] : peaks
+  const edge = (direction: number) => samples.map((peak, index) => {
+    const x = index / (samples.length - 1) * 100
+    return `${x.toFixed(2)},${50 + direction * Math.max(0.4, peak * 46)}`
+  })
   return (
     <svg className="waveform" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Forma de onda do áudio real">
-      <polyline points={points} stroke={color} strokeWidth="0.85" fill="none" strokeLinecap="round" />
+      <polygon points={[...edge(-1), ...edge(1).reverse()].join(' ')} fill={color} />
     </svg>
   )
 }
 
-function MidiRoll({ notes, color, framesPerBeat, timelineFrames }: { notes: MidiNote[]; color: string; framesPerBeat: number; timelineFrames: number }) {
+function MidiRoll({ notes, color, framesPerBeat, timelineFrames, pencil, onDraw }: {
+  notes: MidiNote[]; color: string; framesPerBeat: number; timelineFrames: number; pencil: boolean;
+  onDraw: (x: number, pitch: number) => void
+}) {
   return <div className="midi-roll" aria-label={`${notes.length} nota${notes.length === 1 ? '' : 's'} MIDI gravada${notes.length === 1 ? '' : 's'}`}>
-    {notes.map((note) => <span key={note.id} style={{ left: `${note.startBeat * framesPerBeat / timelineFrames * 100}%`, width: `${note.durationBeats * framesPerBeat / timelineFrames * 100}%`, top: `${Math.max(5, Math.min(75, (108 - note.note) / 60 * 100))}%`, background: color }} title={`MIDI ${note.note} · velocidade ${note.velocity}`} />)}
-    {notes.length === 0 && <small>Arme e grave para desenhar notas MIDI aqui</small>}
+    {notes.map((note) => <span key={note.id} style={{ left: `${note.startBeat * framesPerBeat / timelineFrames * 100}%`, width: `${note.durationBeats * framesPerBeat / timelineFrames * 100}%`, top: `${Math.max(0, Math.min(87, (84 - note.note) / 48 * 87))}%`, background: color }} title={`MIDI ${note.note} · velocidade ${note.velocity}`} />)}
+    {notes.length === 0 && <small>Grave ou adicione notas no editor MIDI</small>}
+    {pencil && <button type="button" className="midi-pencil" aria-label="Desenhar nota MIDI" onClick={(event) => {
+      const bounds = event.currentTarget.getBoundingClientRect()
+      const x = event.detail ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) : 0
+      const y = event.detail ? Math.max(0, Math.min(0.87, (event.clientY - bounds.top) / bounds.height)) : 0.435
+      onDraw(x, Math.round(84 - y / 0.87 * 48))
+    }} />}
   </div>
 }
 
@@ -168,12 +181,17 @@ function Logo() {
   return <div className="brand" aria-label="Vale Studio"><span className="brand-mark">V</span><span>VALE</span><em>STUDIO</em></div>
 }
 
-function Toggle({ pressed, label, onClick, danger = false }: { pressed: boolean; label: string; onClick: () => void; danger?: boolean }) {
-  return <button type="button" className={`tiny-toggle ${pressed ? 'active' : ''} ${danger ? 'danger' : ''}`} aria-pressed={pressed} onClick={onClick}>{label}</button>
+function Toggle({ pressed, label, onClick, danger = false, disabled = false, title }: { pressed: boolean; label: string; onClick: () => void; danger?: boolean; disabled?: boolean; title?: string }) {
+  return <button type="button" className={`tiny-toggle ${pressed ? 'active' : ''} ${danger ? 'danger' : ''}`} aria-pressed={pressed} title={title} disabled={disabled} onClick={onClick}>{label}</button>
 }
 
 function TrackMeter({ value }: { value?: number }) {
   return <div className="track-meter" aria-label={value === undefined ? 'Medidor inativo' : `Nível ${Math.round(meterPercent(value))}%`}><span style={{ height: `${meterPercent(value)}%` }} /></div>
+}
+
+function FaderScale() {
+  return <span className="fader-scale" aria-hidden="true">{[6, 0, -12, -24, -36, -48, -60].map((db) =>
+    <span key={db} style={{ top: `${(6 - db) / 66 * 100}%` }}>{db > 0 ? '+' : ''}{db}</span>)}</span>
 }
 
 function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm: number, signature: TimeSignature) => void; onCancel: () => void }) {
@@ -240,10 +258,14 @@ export default function App() {
   const [dropTrackId, setDropTrackId] = useState<string>()
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [snapToBeat, setSnapToBeat] = useState(false)
-  const [clipTool, setClipTool] = useState<'move' | 'trim'>('move')
+  const [gridDivision, setGridDivision] = useState('beat')
+  const [clipTool, setClipTool] = useState<'move' | 'trim' | 'pencil'>('move')
   const [rulerMode, setRulerMode] = useState<'time' | 'bars'>('time')
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
   const trackDialog = useRef<HTMLDialogElement>(null)
+  const newTrackDialog = useRef<HTMLDialogElement>(null)
+  const firstFadeInput = useRef<HTMLInputElement>(null)
+  const [fadeFocusRequest, setFadeFocusRequest] = useState(0)
   const [, setUndoStack] = useState<AudioProject[]>([])
   const [, setRedoStack] = useState<AudioProject[]>([])
 
@@ -256,6 +278,7 @@ export default function App() {
     for (const marker of project.markers ?? []) end = Math.max(end, marker.frame)
     for (const track of project.tracks) {
       for (const note of track.midiNotes ?? []) end = Math.max(end, (note.startBeat + note.durationBeats) * framesPerBeat)
+      for (const lane of ['gainDb', 'pan'] as const) end = Math.max(end, track.automation?.[lane]?.at(-1)?.frame ?? 0)
     }
     return end
   }, [project])
@@ -326,6 +349,12 @@ export default function App() {
         setRecordingPeaks((peaks) => [...peaks.slice(-119), Math.max(0.02, engineRef.current.getInputMeter()?.peak ?? 0.02)])
       }
       const next: Record<string, number> = {}
+      const masterPeak = engineRef.current.getMasterMeter()?.peak
+      if (masterPeak !== undefined) next.master = masterPeak
+      for (const bus of project.auxBuses ?? []) {
+        const peak = engineRef.current.getAuxMeter(bus.id)?.peak
+        if (peak !== undefined) next[bus.id] = peak
+      }
       project.tracks.forEach((track) => {
         const value = engineRef.current.getTrackMeter(track.id)?.peak
         if (value !== undefined) next[track.id] = value
@@ -353,6 +382,21 @@ export default function App() {
 
   function updateSend(trackId: string, bus: 'reverb' | 'delay', level: number) {
     updateTrack(trackId, (track) => ({ ...track, sends: { reverb: 0, delay: 0, ...track.sends, [bus]: level } }))
+  }
+
+  function updateAux(id: string, change: (bus: AuxBus) => AuxBus) {
+    updateProject((current) => ({ ...current, auxBuses: current.auxBuses?.map((bus) => bus.id === id ? change(bus) : bus) }))
+  }
+
+  function removeAux(id: string) {
+    updateProject((current) => ({
+      ...current,
+      auxBuses: current.auxBuses?.filter((bus) => bus.id !== id),
+      tracks: current.tracks.map((track) => ({
+        ...track, outputBusId: track.outputBusId === id ? undefined : track.outputBusId,
+        auxSends: track.auxSends?.filter((send) => send.busId !== id),
+      })),
+    }))
   }
 
   function openTrackPanel(trackId: string, panel: 'inserts' | 'sends') {
@@ -1031,11 +1075,27 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (fadeFocusRequest) firstFadeInput.current?.focus()
+  }, [fadeFocusRequest])
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const element = event.target as HTMLElement
       if (element.closest('input, select, textarea, [contenteditable="true"], dialog') || !project || event.repeat) return
       const key = event.key.toLowerCase()
       if (event.ctrlKey || event.metaKey) {
+        const canEdit = !isPlaying && !isRecording && !isStarting && !recordTransition.current
+        if (key === 'n' && event.shiftKey && canEdit) {
+          event.preventDefault()
+          newTrackDialog.current?.showModal()
+          return
+        }
+        if (key === 'f' && selectedClip && canEdit) {
+          event.preventDefault()
+          setView('tracks')
+          setFadeFocusRequest((request) => request + 1)
+          return
+        }
         if (!['z', 'y', 's', 'e', '=', ' '].includes(key)) return
         event.preventDefault()
         if (key === 'z') undo()
@@ -1080,6 +1140,8 @@ export default function App() {
   const measuredBarFrames = beatFrames * meterBeats * 4 / meterUnit
   const barFrames = Number.isFinite(measuredBarFrames) && measuredBarFrames > 0 ? measuredBarFrames : project.audioSampleRate * 2
   const barStep = Math.max(1, Math.ceil(timelineFrames / barFrames / (timelineZoom * 12)))
+  const gridFrames = gridDivision === 'bar' ? barFrames : beatFrames / (gridDivision === 'half' ? 2 : gridDivision === 'quarter' ? 4 : 1)
+  const visibleGridFrames = gridFrames * Math.max(1, Math.ceil(timelineFrames / gridFrames / (timelineZoom * 96)))
 
   function seekTimeline(frame: number) {
     if (!canEditTimeline) return
@@ -1110,6 +1172,8 @@ export default function App() {
         </div>
         {selectedTrack?.kind !== 'midi' && <div className="recording-input"><span>Nível de entrada</span><meter min={0} max={1} value={Math.min(1, inputPeak ?? 0)} aria-label="Nível de entrada" /></div>}
         <div className="recording-controls">
+          {selectedTrack && selectedTrack.kind !== 'midi' && <AudioInputSelect value={selectedTrack.inputDeviceId} disabled={isRecording || asioBusy}
+            onChange={(inputDeviceId) => updateTrack(selectedTrack.id, (track) => ({ ...track, inputDeviceId }))} />}
           {selectedTrack && selectedTrack.kind !== 'midi' && <label>Formato de entrada <select value={selectedTrack.recordChannels ?? 1} disabled={isRecording || asioBusy} onChange={(event) => {
             const recordChannels = event.target.value === '2' ? 2 : 1
             updateTrack(selectedTrack.id, (current) => ({ ...current, recordChannels }))
@@ -1142,8 +1206,14 @@ export default function App() {
             {(['2/4', '3/4', '4/4', '6/8', '12/8'] as const).map((signature) => <option key={signature}>{signature}</option>)}
           </select></label>
           <Toggle pressed={snapToBeat} label="Grade" onClick={() => setSnapToBeat(!snapToBeat)} />
-          <label>Ferramenta <select aria-label="Ferramenta de clipe" value={clipTool} onChange={(event) => setClipTool(event.target.value === 'trim' ? 'trim' : 'move')}>
-            <option value="move">Mover</option><option value="trim">Trim</option>
+          {snapToBeat && <select aria-label="Divisão da grade" value={gridDivision} onChange={(event) => setGridDivision(event.target.value)}>
+            <option value="bar">Compasso</option><option value="beat">Semínima</option><option value="half">Colcheia</option><option value="quarter">Semicolcheia</option>
+          </select>}
+          <label>Ferramenta <select aria-label="Ferramenta de clipe" value={clipTool} onChange={(event) => {
+            const tool = event.target.value
+            setClipTool(tool === 'trim' || tool === 'pencil' ? tool : 'move')
+          }}>
+            <option value="move">Mover</option><option value="trim">Trim</option><option value="pencil">Lápis MIDI</option>
           </select></label>
           <label>Zoom <select aria-label="Zoom horizontal da timeline" value={timelineZoom} onChange={(event) => setTimelineZoom(Number(event.target.value))}>
             <option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8×</option>
@@ -1151,7 +1221,11 @@ export default function App() {
         </div>
       </div>
       <div className="timeline-viewport">
-      <div className="timeline-grid" style={{ '--timeline-zoom': timelineZoom } as React.CSSProperties}>
+      <div className="timeline-grid" style={{
+        '--timeline-zoom': timelineZoom,
+        '--major-grid': `${rulerMode === 'bars' || snapToBeat ? barFrames * barStep / timelineFrames * 100 : 25 / timelineZoom}%`,
+        '--minor-grid': `${rulerMode === 'bars' || snapToBeat ? visibleGridFrames / timelineFrames * 100 : 6.25 / timelineZoom}%`,
+      } as React.CSSProperties}>
       <div className="ruler">
         <button type="button" className="ruler-seek" aria-label="Posicionar cursor na régua de tempo" disabled={!canEditTimeline}
           onClick={(event) => {
@@ -1179,6 +1253,7 @@ export default function App() {
       </div>
       {project.tracks.map((track, index) => <article key={track.id} data-track-id={track.id}
         className={`track-row ${selectedTrack?.id === track.id ? 'selected' : ''} ${draggedTrackId === track.id ? 'dragging' : ''} ${dropTrackId === track.id && draggedTrackId !== track.id ? 'track-drop-target' : ''}`}
+        style={{ '--track-color': track.color } as React.CSSProperties}
         onClick={() => { if (!isRecording) setSelectedTrackId(track.id) }}>
         <div className="track-head">
           <button type="button" className="track-handle" style={{ color: track.color }} disabled={!canEditTimeline}
@@ -1209,23 +1284,30 @@ export default function App() {
           <div><strong>{track.name}</strong><small>{track.kind === 'midi' ? 'Instrumento MIDI' : track.recordChannels === 2 ? 'Entrada estéreo' : 'Entrada mono'}</small></div>
           <TrackMeter value={track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' ? inputPeak : trackPeaks[track.id]} />
           <div className="track-toggles">
-            <Toggle pressed={track.armed} label="ARM" danger onClick={() => { if (!isRecording) updateTrack(track.id, (current) => ({ ...current, armed: !current.armed })) }} />
+            <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording} onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} />
             <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} />
             <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} />
-            {track.kind !== 'midi' && <button className="tiny-toggle" onClick={() => cycleMonitor(track)}>MON</button>}
+            {track.kind !== 'midi' && <Toggle pressed={track.monitorMode !== 'off'} label="I" title={`Monitoramento · ${track.monitorMode === 'software' ? 'Software' : track.monitorMode === 'direct' ? 'Direto' : 'Desligado'}`} onClick={() => cycleMonitor(track)} />}
           </div>
           <div className="track-routing">
-            <button className="tiny-toggle" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>Inserts</button>
+            <button className="tiny-toggle" aria-label="Inserts" title={track.vst3Inserts[0]?.name ?? 'Inserts da pista'} disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? 'Inserts'}</button>
             <button className="tiny-toggle" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'sends')}>Sends</button>
           </div>
         </div>
         <div className="clip-lane">
-          {track.kind === 'midi' && <MidiRoll notes={track.midiNotes ?? []} color={track.color} framesPerBeat={project.audioSampleRate * 60 / project.bpm} timelineFrames={timelineFrames} />}
+          {track.kind === 'midi' && <MidiRoll notes={track.midiNotes ?? []} color={track.color} framesPerBeat={project.audioSampleRate * 60 / project.bpm} timelineFrames={timelineFrames}
+            pencil={clipTool === 'pencil' && canEditTimeline} onDraw={(position, note) => {
+              const step = snapToBeat ? gridFrames / beatFrames : 1 / 960
+              const startBeat = Math.round(position * timelineFrames / beatFrames / step) * step
+              const drawn = { id: makeId(), note, startBeat, durationBeats: 0.25, velocity: 100 }
+              setSelectedTrackId(track.id)
+              updateTrack(track.id, (current) => ({ ...current, midiNotes: [...(current.midiNotes ?? []), drawn] }))
+            }} />}
           {track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
             <Waveform peaks={recordingPeaks.length ? recordingPeaks : [0]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {project.clips.filter((clip) => clip.trackId === track.id).map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
-            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? beatFrames : undefined} tool={clipTool} selected={selectedClipId === clip.id} editable={canEditTimeline}
+            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil'}
             onSelect={() => { if (!isRecording) { setSelectedTrackId(track.id); setSelectedClipId(clip.id) } }}
             onEdit={(updated) => updateProject((current) => ({ ...current, clips: current.clips.map((item) => item.id === clip.id ? updated : item) }))} />)}
         </div>
@@ -1246,6 +1328,15 @@ export default function App() {
         {project.markers?.some((marker) => marker.frame === playhead) && <button type="button" className="button secondary" disabled={!canEditTimeline}
           onClick={() => updateProject((current) => ({ ...current, markers: current.markers?.filter((marker) => marker.frame !== playhead) }))}>Remover marcadores no cursor</button>}
       </form>
+      {selectedTrack?.kind === 'midi' && <MidiEditor key={selectedTrack.id} notes={selectedTrack.midiNotes ?? []}
+        cursorBeat={playhead * project.bpm / (60 * project.audioSampleRate)} disabled={!canEditTimeline}
+        onChange={(midiNotes) => updateTrack(selectedTrack.id, (track) => ({ ...track, midiNotes }))} />}
+      {selectedTrack && <details className="track-automation">
+        <summary>Automação da pista</summary>
+        <AutomationEditor key={selectedTrack.id} automation={selectedTrack.automation} defaults={selectedTrack}
+          playhead={playhead} frames={timelineFrames} rate={project.audioSampleRate} disabled={!canEditTimeline}
+          onChange={(automation) => updateTrack(selectedTrack.id, (track) => ({ ...track, automation }))} />
+      </details>}
       {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button><button disabled={!canEditTimeline} onClick={() => updateClip('crossfade')}>Crossfade</button>
         <label className="fade-control">Ganho do clipe (dB)
           <input type="number" min={-60} max={12} step={0.5} value={selectedClip.gainDb} disabled={!canEditTimeline} onChange={(event) => {
@@ -1257,43 +1348,77 @@ export default function App() {
           const maxFrames = Math.max(0, selectedClip.durationFrames - other)
           return <label className="fade-control" key={field}>
           {field === 'fadeInFrames' ? 'Entrada (ms)' : 'Saída (ms)'}
-          <input type="number" min={0} max={Math.round(maxFrames / project.audioSampleRate * 1000)} disabled={!canEditTimeline} value={Math.round(selectedClip[field] / project.audioSampleRate * 1000)} onChange={(event) => {
+          <input ref={field === 'fadeInFrames' ? firstFadeInput : undefined} type="number" min={0} max={Math.round(maxFrames / project.audioSampleRate * 1000)} disabled={!canEditTimeline} value={Math.round(selectedClip[field] / project.audioSampleRate * 1000)} onChange={(event) => {
             const frames = Math.round(Number(event.target.value) * project.audioSampleRate / 1000)
             const value = Math.max(0, Math.min(maxFrames, frames))
             updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, [field]: value } : clip) }))
           }} />
         </label>})}<button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
 
-    {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><span className="eyebrow">MIXER</span><h2>Controle real por pista.</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><div className="mixer-routing">
+    {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><h2>Mixer</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><div className="mixer-routing">
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? '＋ Insert VST3'}</button>
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'sends')}>Sends</button>
-    </div><label>Cor da pista<input className="track-color-input" type="color" value={track.color} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, color: event.target.value }))} /></label><TrackMeter value={trackPeaks[track.id]} /><input aria-label={`Volume de ${track.name}`} className="fader" type="range" min="-60" max="6" step="0.5" value={track.gainDb} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, gainDb: Number(event.target.value) }))} /><output>{dbLabel(track.gainDb)}</output><label>Pan<input type="range" min="-1" max="1" step="0.05" value={track.pan} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, pan: Number(event.target.value) }))} /></label>
+    </div><label>Cor da pista<input className="track-color-input" type="color" value={track.color} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, color: event.target.value }))} /></label><div className="fader-bank"><FaderScale /><input aria-label={`Volume de ${track.name}`} className="fader" type="range" min="-60" max="6" step="0.5" value={track.gainDb} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, gainDb: Number(event.target.value) }))} /><TrackMeter value={trackPeaks[track.id]} /></div><output>{dbLabel(track.gainDb)}</output><label>Pan<input type="range" min="-1" max="1" step="0.05" value={track.pan} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, pan: Number(event.target.value) }))} /></label>
         <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
           <small>SENDS</small>
           {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'} value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => updateTrack(track.id, (current) => ({ ...current, sends: { reverb: 0, delay: 0, ...current.sends, [bus]: value / 100 } }))} />)}
-        </div><div><Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} /><Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} /></div></article>)}
+        </div><div className="strip-toggles">
+          <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording} onClick={() => updateTrack(track.id, (item) => ({ ...item, armed: !item.armed }))} />
+          {track.kind !== 'midi' && <Toggle pressed={track.monitorMode !== 'off'} label="I" title="Monitoramento de entrada" onClick={() => cycleMonitor(track)} />}
+          <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (item) => ({ ...item, mute: !item.mute }))} />
+          <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (item) => ({ ...item, solo: !item.solo }))} />
+        </div></article>)}
+        {(project.auxBuses ?? []).map((bus) => <article className="channel-strip aux-strip" key={bus.id}>
+          <strong>Auxiliar</strong>
+          <label>Nome <input aria-label={`Nome de ${bus.name}`} maxLength={40} value={bus.name} onChange={(event) => {
+            const name = event.target.value
+            updateAux(bus.id, (item) => ({ ...item, name }))
+          }} /></label>
+          <div className="fader-bank"><FaderScale />
+            <input aria-label={`Volume de ${bus.name}`} className="fader" type="range" min="-60" max="6" step="0.5" value={bus.gainDb}
+              onChange={(event) => { const gainDb = Number(event.target.value); updateAux(bus.id, (item) => ({ ...item, gainDb })) }} />
+            <TrackMeter value={trackPeaks[bus.id]} />
+          </div>
+          <output>{dbLabel(bus.gainDb)}</output>
+          <Toggle pressed={bus.mute} label="M" onClick={() => updateAux(bus.id, (item) => ({ ...item, mute: !item.mute }))} />
+          <button className="button secondary" type="button" disabled={!canEditTimeline} onClick={() => removeAux(bus.id)}>Remover auxiliar</button>
+        </article>)}
         <article className="channel-strip master-strip">
           <strong>Master</strong>
+          <div className="fader-bank"><FaderScale />
           <input aria-label="Volume master" className="fader" type="range" min="-60" max="6" step="0.5" value={project.masterGainDb ?? 0} onChange={(event) => {
             const value = Number(event.target.value)
             updateProject((current) => ({ ...current, masterGainDb: value }), false)
-          }} />
+          }} /><TrackMeter value={trackPeaks.master} /></div>
           <output>{dbLabel(project.masterGainDb ?? 0)}</output>
+          <button className="button secondary" type="button" disabled={!canEditTimeline || (project.auxBuses?.length ?? 0) >= 32} onClick={() => {
+            const id = makeId()
+            updateProject((current) => ({ ...current, auxBuses: [...(current.auxBuses ?? []), { id, name: `Auxiliar ${(current.auxBuses?.length ?? 0) + 1}`, gainDb: 0, mute: false }] }))
+          }}>＋ Auxiliar</button>
         </article>
       </div></section>}
 
-    {view === 'effects' && selectedTrack && <section className="effects-view"><div className="view-intro"><div><span className="eyebrow">EFEITOS REAIS</span><h2>{selectedTrack.name}</h2><p>Os controles abaixo alteram o grafo de áudio quando a faixa é reproduzida ou exportada.</p></div><select value={selectedTrack.id} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div><div className="effects-grid"><EffectCard title="Filtro de graves" active={selectedTrack.effects.highPassEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassEnabled: !track.effects.highPassEnabled } }))}><RangeControl label="Frequência" value={selectedTrack.effects.highPassHz} min={20} max={500} suffix=" Hz" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassHz: value } }))} /></EffectCard><EffectCard title="Compressor" active={selectedTrack.effects.compressorEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, compressorEnabled: !track.effects.compressorEnabled } }))}><RangeControl label="Threshold" value={selectedTrack.effects.threshold} min={-60} max={0} suffix=" dB" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, threshold: value } }))} /><RangeControl label="Ratio" value={selectedTrack.effects.ratio} min={1} max={12} step={0.5} suffix=":1" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, ratio: value } }))} /></EffectCard><EffectCard title="Reverb" active={selectedTrack.effects.reverbEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbEnabled: !track.effects.reverbEnabled } }))}><RangeControl label="Mix" value={selectedTrack.effects.reverbMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbMix: value / 100 } }))} /></EffectCard><EffectCard title="Delay" active={selectedTrack.effects.delayEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayEnabled: !track.effects.delayEnabled } }))}><RangeControl label="Tempo" value={selectedTrack.effects.delayTime * 1000} min={40} max={1200} suffix=" ms" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayTime: value / 1000 } }))} /><RangeControl label="Mix" value={selectedTrack.effects.delayMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayMix: value / 100 } }))} /></EffectCard></div></section>}
+    {view === 'effects' && selectedTrack && <section className="effects-view"><div className="view-intro"><div><span className="eyebrow">EFEITOS REAIS</span><h2>{selectedTrack.name}</h2><p>Os controles abaixo alteram o grafo de áudio quando a faixa é reproduzida ou exportada.</p></div><select value={selectedTrack.id} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div><div className="effects-grid"><TrackEqualizer effects={selectedTrack.effects} onChange={(eq) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, eq } }))} /><EffectCard title="Filtro de graves" active={selectedTrack.effects.highPassEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassEnabled: !track.effects.highPassEnabled } }))}><RangeControl label="Frequência" value={selectedTrack.effects.highPassHz} min={20} max={500} suffix=" Hz" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassHz: value } }))} /></EffectCard><EffectCard title="Compressor" active={selectedTrack.effects.compressorEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, compressorEnabled: !track.effects.compressorEnabled } }))}><RangeControl label="Threshold" value={selectedTrack.effects.threshold} min={-60} max={0} suffix=" dB" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, threshold: value } }))} /><RangeControl label="Ratio" value={selectedTrack.effects.ratio} min={1} max={12} step={0.5} suffix=":1" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, ratio: value } }))} /></EffectCard><EffectCard title="Reverb" active={selectedTrack.effects.reverbEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbEnabled: !track.effects.reverbEnabled } }))}><RangeControl label="Mix" value={selectedTrack.effects.reverbMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbMix: value / 100 } }))} /></EffectCard><EffectCard title="Delay" active={selectedTrack.effects.delayEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayEnabled: !track.effects.delayEnabled } }))}><RangeControl label="Tempo" value={selectedTrack.effects.delayTime * 1000} min={40} max={1200} suffix=" ms" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayTime: value / 1000 } }))} /><RangeControl label="Mix" value={selectedTrack.effects.delayMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayMix: value / 100 } }))} /></EffectCard></div></section>}
 
     {view === 'takes' && <section className="takes-view"><div className="view-intro"><div><span className="eyebrow">GERENCIAMENTO DE TAKES</span><h2>{selectedTrack?.name ?? 'Selecione uma pista'}</h2><p>Somente o take marcado como ativo de cada pista entra na prévia e na renderização. A troca não apaga nenhuma versão.</p></div><select value={selectedTrack?.id ?? ''} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div>{selectedTrack && project.takes.filter((take) => take.trackId === selectedTrack.id).length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum take nesta pista.</p><small>Arme a pista e grave para criar versões recuperáveis.</small></div> : <div className="take-list">{project.takes.filter((take) => take.trackId === selectedTrack?.id).map((take, index) => { const asset = activeAssetById.get(take.assetId); return <article key={take.id} className={`take-card ${take.selected ? 'selected' : ''}`}><div className="take-wave"><Waveform peaks={asset?.peaks ?? [0]} color={selectedTrack?.color ?? '#1eaeff'} /></div><div className="take-copy"><small>TAKE {String(index + 1).padStart(2, '0')} · {take.selected ? 'ATIVO' : 'ALTERNATIVO'}</small><strong>{take.name}</strong><span>{formatDuration(take.durationFrames, project.audioSampleRate)} · início {formatDuration(take.startFrame, project.audioSampleRate)}</span></div><div className="take-actions"><button className="button secondary" onClick={() => void previewTake(take.id)}>{previewingTakeId === take.id ? 'Ouvindo…' : 'Ouvir'}</button><button className={`button ${take.selected ? 'selected-take' : 'primary'}`} onClick={() => selectTake(take.id)}>{take.selected ? 'Em uso' : 'Usar take'}</button></div></article> })}</div>}</section>}
 
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
+    <dialog ref={newTrackDialog} className="routing-dialog" aria-labelledby="new-track-title">
+      <header><h2 id="new-track-title">Nova pista</h2><form method="dialog"><button className="icon-button" aria-label="Fechar">×</button></form></header>
+      <button className="button secondary" type="button" onClick={() => { addTrack(); setView('tracks'); newTrackDialog.current?.close() }}>Pista de áudio</button>
+      <button className="button secondary" type="button" onClick={() => { addMidiTrack(); setView('tracks'); newTrackDialog.current?.close() }}>Pista de instrumento MIDI</button>
+    </dialog>
     <dialog ref={trackDialog} className="routing-dialog" aria-labelledby="routing-title" onClose={() => setTrackPanel(undefined)}>
       {trackPanel && selectedTrack && <>
         <header><div><small>{selectedTrack.name}</small><h2 id="routing-title">{trackPanel === 'inserts' ? 'Inserts VST3' : 'Sends'}</h2></div>
           <form method="dialog"><button className="icon-button" aria-label="Fechar painel">×</button></form>
         </header>
-        {trackPanel === 'sends' ? <TrackSends track={selectedTrack} onChange={(bus, level) => updateSend(selectedTrack.id, bus, level)} /> : <>
+        {trackPanel === 'sends' ? <>
+          <TrackSends track={selectedTrack} onChange={(bus, level) => updateSend(selectedTrack.id, bus, level)} />
+          <AuxRouting buses={project.auxBuses ?? []} track={selectedTrack} disabled={!canEditTimeline}
+            onChange={(routing) => updateTrack(selectedTrack.id, (track) => ({ ...track, ...routing }))} />
+        </> : <>
           {desktopRuntime ? vst3Plugins.length > 0 ?
             <Vst3CatalogInsert key={selectedTrack.id} plugins={vst3Plugins} track={selectedTrack} onInsert={addVst3Insert} />
             : <button className="button secondary" disabled={isScanningVst3} onClick={() => void chooseAndScanVst3Directory()}>{isScanningVst3 ? 'Buscando VST3…' : 'Buscar pasta de plugins VST3'}</button>
@@ -1314,6 +1439,15 @@ export default function App() {
     <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
     {toast && <div className={`toast ${toast.tone}`}>{toast.text}<button onClick={() => setToast(undefined)} aria-label="Fechar aviso">×</button></div>}
   </main>
+}
+
+function TrackEqualizer({ effects, onChange }: { effects: EffectSettings; onChange: (eq: NonNullable<EffectSettings['eq']>) => void }) {
+  const eq = effects.eq ?? { enabled: false, low: 0, mid: 0, high: 0 }
+  const bands = { low: 'Graves · 120 Hz', mid: 'Médios · 1 kHz', high: 'Agudos · 6 kHz' }
+  return <EffectCard title="Equalizador" active={eq.enabled} onToggle={() => onChange({ ...eq, enabled: !eq.enabled })}>
+    {(['low', 'mid', 'high'] as const).map((band) => <RangeControl key={band} label={bands[band]} value={eq[band]}
+      min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => onChange({ ...eq, [band]: value })} />)}
+  </EffectCard>
 }
 
 function RangeControl({ label, value, min, max, suffix, step = 1, onChange }: { label: string; value: number; min: number; max: number; suffix: string; step?: number; onChange: (value: number) => void }) {

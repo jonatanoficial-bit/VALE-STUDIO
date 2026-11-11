@@ -2,6 +2,7 @@ import type { AudioProject, Clip, MonitorMode, Track } from '../domain/model'
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
+import { scheduleAutomation } from './automation'
 import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type AsioSettings } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
@@ -9,6 +10,7 @@ type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; sho
 
 type TrackGraph = {
   highPass: BiquadFilterNode
+  eq: Record<'low' | 'mid' | 'high', BiquadFilterNode>
   compressor: DynamicsCompressorNode
   reverbGain: GainNode
   delayGain: GainNode
@@ -19,6 +21,7 @@ type TrackGraph = {
   sends: Record<'reverb' | 'delay', GainNode>
   input?: AudioNode
   instrument?: AudioWorkletNode
+  automationState?: { settings: Track['automation']; muted: boolean }
 }
 
 type SendBuses = Record<'reverb' | 'delay', AudioNode>
@@ -104,6 +107,9 @@ export class AudioEngine {
   private master?: GainNode
   private assetBuffers = new Map<string, AudioBuffer>()
   private liveGraphs = new Map<string, TrackGraph>()
+  private masterAnalyser?: AnalyserNode
+  private liveAuxes = new Map<string, GainNode>()
+  private liveAuxMeters = new Map<string, AnalyserNode>()
   private liveMixOutput?: GainNode
   private scheduledNotes = new Set<OscillatorNode>()
   private nativeInserts: NativeInsert[] = []
@@ -146,7 +152,9 @@ export class AudioEngine {
       this.context = new AudioContext({ latencyHint: 'interactive' })
       this.master = this.context.createGain()
       this.master.gain.value = 0.92
-      this.master.connect(this.context.destination)
+      this.masterAnalyser = this.context.createAnalyser()
+      this.masterAnalyser.fftSize = 512
+      this.master.connect(this.masterAnalyser).connect(this.context.destination)
     }
     if (this.context.state !== 'running') await this.context.resume()
     if (this.context.audioWorklet && !this.workletLoaded) {
@@ -347,6 +355,15 @@ export class AudioEngine {
     highPass.type = 'highpass'
     highPass.frequency.value = track.effects.highPassEnabled ? track.effects.highPassHz : 10
     highPass.Q.value = 0.7
+    const eq = { low: context.createBiquadFilter(), mid: context.createBiquadFilter(), high: context.createBiquadFilter() }
+    eq.low.type = 'lowshelf'
+    eq.low.frequency.value = 120
+    eq.mid.type = 'peaking'
+    eq.mid.frequency.value = 1000
+    eq.mid.Q.value = 0.85
+    eq.high.type = 'highshelf'
+    eq.high.frequency.value = 6000
+    for (const band of ['low', 'mid', 'high'] as const) eq[band].gain.value = track.effects.eq?.enabled ? track.effects.eq[band] : 0
 
     const compressor = context.createDynamicsCompressor()
     compressor.threshold.value = track.effects.compressorEnabled ? track.effects.threshold : 0
@@ -373,7 +390,7 @@ export class AudioEngine {
     const shouldMute = track.mute || (soloActive && !track.solo)
     fader.gain.value = shouldMute ? 0 : dbToGain(track.gainDb)
 
-    highPass.connect(compressor)
+    highPass.connect(eq.low).connect(eq.mid).connect(eq.high).connect(compressor)
     compressor.connect(dry).connect(panner)
     compressor.connect(reverb).connect(reverbGain).connect(panner)
     compressor.connect(delay).connect(delayGain).connect(panner)
@@ -387,7 +404,50 @@ export class AudioEngine {
       fader.connect(sends[bus]).connect(buses[bus])
     }
 
-    return { highPass, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
+    return { highPass, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
+  }
+
+  private applyTrackAutomation(graph: TrackGraph, track: Track, muted: boolean, frame: number, rate: number, at: number): void {
+    const automation = track.automation
+    const changed = graph.automationState?.settings !== automation || graph.automationState?.muted !== muted
+    for (const lane of ['gainDb', 'pan'] as const) {
+      const isGain = lane === 'gainDb'
+      const param = isGain ? graph.fader.gain : graph.panner.pan
+      const convert = isGain ? dbToGain : (value: number) => value
+      const points = automation?.mode === 'read' ? automation[lane] : undefined
+      if (points?.length && !(isGain && muted)) {
+        if (changed) scheduleAutomation(param, points, frame, rate, at, convert)
+      } else {
+        if (changed) param.cancelScheduledValues(at)
+        param.setTargetAtTime(isGain && muted ? 0 : convert(track[lane]), at, 0.015)
+      }
+    }
+    graph.automationState = { settings: automation, muted }
+  }
+
+  private makeAuxBuses(context: BaseAudioContext, project: AudioProject, output: AudioNode, meters?: Map<string, AnalyserNode>): Map<string, GainNode> {
+    return new Map((project.auxBuses ?? []).map((bus) => {
+      const node = context.createGain()
+      node.gain.value = bus.mute ? 0 : dbToGain(bus.gainDb)
+      if (meters) {
+        const meter = context.createAnalyser()
+        meter.fftSize = 512
+        node.connect(meter).connect(output)
+        meters.set(bus.id, meter)
+      } else node.connect(output)
+      return [bus.id, node]
+    }))
+  }
+
+  private routeTrackOutput(source: AudioNode, track: Track, output: AudioNode, auxes: Map<string, GainNode>): void {
+    source.connect(auxes.get(track.outputBusId ?? '') ?? output)
+    for (const send of track.auxSends ?? []) {
+      const destination = auxes.get(send.busId)
+      if (!destination || send.busId === track.outputBusId || send.level === 0) continue
+      const gain = source.context.createGain()
+      gain.gain.value = sendLevel(send.level)
+      source.connect(gain).connect(destination)
+    }
   }
 
   private scheduleMidi(context: BaseAudioContext, track: Track, input: AudioNode, bpm: number, from: number, at: number): void {
@@ -584,6 +644,7 @@ export class AudioEngine {
     this.liveMixOutput = output
     this.master.gain.value = masterLevel(project)
     const buses = this.makeSendBuses(context, output)
+    this.liveAuxes = this.makeAuxBuses(context, project, output, this.liveAuxMeters)
     const latencies = new Map<string, number>()
     const pendingOutputs = new Map<string, SendBuses & { main: AudioNode }>()
     for (const track of project.tracks) {
@@ -602,21 +663,24 @@ export class AudioEngine {
       pendingOutputs.set(track.id, { main: trackOutput, ...trackBuses })
     }
     const maxLatency = Math.max(0, ...latencies.values())
-    for (const [id, taps] of pendingOutputs) {
-      const compensation = Math.max(0, maxLatency - (latencies.get(id) ?? 0))
-      for (const [source, destination] of [[taps.main, output], [taps.reverb, buses.reverb], [taps.delay, buses.delay]]) {
-        if (compensation === 0) source.connect(destination)
-        else {
-          const delay = context.createDelay(Math.max(1, compensation))
-          delay.delayTime.value = compensation
-          source.connect(delay).connect(destination)
-        }
+    for (const track of project.tracks) {
+      const taps = pendingOutputs.get(track.id)!
+      const compensation = Math.max(0, maxLatency - (latencies.get(track.id) ?? 0))
+      const align = (source: AudioNode): AudioNode => {
+        if (compensation === 0) return source
+        const delay = context.createDelay(Math.max(1, compensation))
+        delay.delayTime.value = compensation
+        return source.connect(delay)
       }
+      this.routeTrackOutput(align(taps.main), track, output, this.liveAuxes)
+      align(taps.reverb).connect(buses.reverb)
+      align(taps.delay).connect(buses.delay)
     }
     const startAt = context.currentTime + 0.04
     const from = startFrame / project.audioSampleRate
     for (const track of project.tracks) {
       const graph = this.liveGraphs.get(track.id)!
+      this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), startFrame, project.audioSampleRate, startAt)
       if (graph.instrument) graph.instrument.port.postMessage({
         type: 'events',
         events: this.vstEvents(track, project.bpm, from, startAt, context.sampleRate),
@@ -670,11 +734,16 @@ export class AudioEngine {
     safeDisconnect(this.liveMixOutput)
     this.liveMixOutput = undefined
     this.liveGraphs.clear()
+    this.liveAuxes.clear()
+    this.liveAuxMeters.clear()
   }
 
   updateMix(project: AudioProject): void {
     const at = this.context?.currentTime ?? 0
     this.master?.gain.setTargetAtTime(masterLevel(project), at, 0.015)
+    for (const bus of project.auxBuses ?? []) {
+      this.liveAuxes.get(bus.id)?.gain.setTargetAtTime(bus.mute ? 0 : dbToGain(bus.gainDb), at, 0.015)
+    }
     const soloActive = project.tracks.some((track) => track.solo)
     project.tracks.forEach((track) => {
       const graph = this.liveGraphs.get(track.id)
@@ -683,26 +752,32 @@ export class AudioEngine {
         graph.sends[bus].gain.setTargetAtTime(sendLevel(track.sends?.[bus]), at, 0.015)
       }
       graph.highPass.frequency.setTargetAtTime(track.effects.highPassEnabled ? track.effects.highPassHz : 10, at, 0.015)
+      for (const band of ['low', 'mid', 'high'] as const) graph.eq[band].gain.setTargetAtTime(track.effects.eq?.enabled ? track.effects.eq[band] : 0, at, 0.015)
       graph.compressor.threshold.setTargetAtTime(track.effects.compressorEnabled ? track.effects.threshold : 0, at, 0.015)
       graph.compressor.ratio.setTargetAtTime(track.effects.compressorEnabled ? track.effects.ratio : 1, at, 0.015)
       graph.reverbGain.gain.setTargetAtTime(track.effects.reverbEnabled ? track.effects.reverbMix : 0, at, 0.015)
       graph.delayGain.gain.setTargetAtTime(track.effects.delayEnabled ? track.effects.delayMix : 0, at, 0.015)
       graph.delay.delayTime.setTargetAtTime(track.effects.delayTime, at, 0.015)
-      graph.panner.pan.setTargetAtTime(track.pan, at, 0.015)
-      graph.fader.gain.setTargetAtTime(track.mute || (soloActive && !track.solo) ? 0 : dbToGain(track.gainDb), at, 0.015)
+      if (this.playing) this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), this.getCurrentFrame(project.audioSampleRate), project.audioSampleRate, Math.max(at, this.playStartedAt))
     })
   }
 
-  private async requestInput(channels: 1 | 2): Promise<MediaStream> {
+  private async requestInput(channels: 1 | 2, inputDeviceId?: string): Promise<MediaStream> {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Este navegador não oferece acesso ao microfone.')
     const channelCount = channels === 2 ? { exact: 2 } : 1
     const constraints: MediaTrackConstraints = { channelCount, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    if (inputDeviceId) constraints.deviceId = { exact: inputDeviceId }
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: constraints })
     } catch (error) {
-      if (channels === 2 && error instanceof DOMException && error.name === 'OverconstrainedError') {
-        throw new Error('A entrada de áudio selecionada não oferece captura estéreo.')
+      if (error instanceof DOMException) {
+        if (inputDeviceId && (error.name === 'NotFoundError' || (error.name === 'OverconstrainedError' && (error as OverconstrainedError).constraint === 'deviceId'))) {
+          throw new Error('A entrada de áudio selecionada está indisponível. Escolha outra entrada na pista.')
+        }
+        if (channels === 2 && error.name === 'OverconstrainedError') {
+          throw new Error('A entrada de áudio selecionada não oferece captura estéreo.')
+        }
       }
       throw error
     }
@@ -747,7 +822,7 @@ export class AudioEngine {
     if (!this.context || !this.context.audioWorklet) throw new Error('AudioWorklet não está disponível. A gravação multipista não pode ser iniciada com segurança neste navegador.')
     if (this.recordingTrackId) throw new Error('Já existe uma gravação em andamento.')
 
-    const stream = await this.requestInput(channels)
+    const stream = await this.requestInput(channels, project.tracks.find((track) => track.id === trackId)?.inputDeviceId)
     const [inputTrack] = stream.getAudioTracks()
     this.recordingSettings = inputTrack?.getSettings()
     this.stream = stream
@@ -859,7 +934,18 @@ export class AudioEngine {
   }
 
   getTrackMeter(trackId: string): { peak: number; rms: number } | undefined {
-    const analyser = this.liveGraphs.get(trackId)?.analyser
+    return this.readMeter(this.liveGraphs.get(trackId)?.analyser)
+  }
+
+  getMasterMeter(): { peak: number; rms: number } | undefined {
+    return this.readMeter(this.masterAnalyser)
+  }
+
+  getAuxMeter(busId: string): { peak: number; rms: number } | undefined {
+    return this.readMeter(this.liveAuxMeters.get(busId))
+  }
+
+  private readMeter(analyser?: AnalyserNode): { peak: number; rms: number } | undefined {
     if (!analyser) return undefined
     const data = new Float32Array(analyser.fftSize)
     analyser.getFloatTimeDomainData(data)
@@ -1044,9 +1130,13 @@ export class AudioEngine {
     master.connect(offline.destination)
     const soloActive = project.tracks.some((track) => track.solo)
     const buses = this.makeSendBuses(offline, master)
+    const auxes = this.makeAuxBuses(offline, project, master)
     for (const track of project.tracks) {
       if (track.mute || (soloActive && !track.solo)) continue
-      const graph = this.makeTrackGraph(offline, track, master, soloActive, buses)
+      const output = offline.createGain()
+      this.routeTrackOutput(output, track, master, auxes)
+      const graph = this.makeTrackGraph(offline, track, output, soloActive, buses)
+      this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
       await this.scheduleRenderTrack(offline, project, track, graph)
     }
     return offline.startRendering()
@@ -1060,7 +1150,10 @@ export class AudioEngine {
     const master = offline.createGain()
     master.gain.value = 0.92
     master.connect(offline.destination)
-    const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, master, false, this.makeSendBuses(offline, master))
+    const output = offline.createGain()
+    this.routeTrackOutput(output, track, master, this.makeAuxBuses(offline, project, master))
+    const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, output, false, this.makeSendBuses(offline, master))
+    this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
     await this.scheduleRenderTrack(offline, project, track, graph)
     return offline.startRendering()
   }

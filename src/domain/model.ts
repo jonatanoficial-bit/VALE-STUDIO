@@ -1,8 +1,14 @@
 export type TimeSignature = '2/4' | '3/4' | '4/4' | '6/8' | '12/8'
 export type MonitorMode = 'off' | 'software' | 'direct'
+export type AutomationLane = 'gainDb' | 'pan'
+export type AutomationPoint = { frame: number; value: number }
+export type TrackAutomation = { mode: 'off' | 'read'; gainDb?: AutomationPoint[]; pan?: AutomationPoint[] }
+export type AuxBus = { id: string; name: string; gainDb: number; mute: boolean }
+export const MAX_AUX_SENDS = 10
 export const DEFAULT_VST_BUFFER_FRAMES = 512
 
 export type EffectSettings = {
+  eq?: { enabled: boolean; low: number; mid: number; high: number }
   highPassEnabled: boolean
   highPassHz: number
   compressorEnabled: boolean
@@ -86,11 +92,15 @@ export type Track = {
   gainDb: number
   pan: number
   sends?: { reverb: number; delay: number }
+  outputBusId?: string
+  auxSends?: Array<{ busId: string; level: number }>
   mute: boolean
   solo: boolean
   armed: boolean
   monitorMode: MonitorMode
   recordChannels?: 1 | 2
+  inputDeviceId?: string
+  automation?: TrackAutomation
   effects: EffectSettings
   vst3Inserts: Vst3Insert[]
   kind?: 'audio' | 'midi'
@@ -100,6 +110,7 @@ export type Track = {
 }
 
 export type AudioProject = {
+  auxBuses?: AuxBus[]
   markers?: Array<{ id: string; frame: number; name: string }>
   schemaVersion: 1
   id: string

@@ -1,4 +1,5 @@
 import type { AudioProject, MediaAsset } from '../domain/model'
+import { MAX_AUX_SENDS } from '../domain/model'
 import { projectRepository } from './projectRepository'
 
 export const PROJECT_ARCHIVE_MIME = 'application/x-valestudio+json'
@@ -22,6 +23,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 }
 
+function validAutomationLane(input: unknown, min: number, max: number): boolean {
+  if (input === undefined) return true
+  if (!Array.isArray(input)) return false
+  let previous = -1
+  for (const entry of input) {
+    const point = asRecord(entry)
+    if (!point || typeof point.frame !== 'number' || !Number.isSafeInteger(point.frame) || point.frame <= previous ||
+      typeof point.value !== 'number' || !Number.isFinite(point.value) || point.value < min || point.value > max) return false
+    previous = point.frame
+  }
+  return true
+}
+
 function assertArchive(value: unknown): asserts value is ProjectArchive {
   const archive = asRecord(value)
   const project = asRecord(archive?.project)
@@ -38,6 +52,19 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   const clipIds = identifiers(project.clips as unknown[], 'Lista de clipes')
   const takeIds = identifiers(project.takes as unknown[], 'Lista de takes')
   const archiveAssetIds = identifiers(archive.assets as unknown[], 'Conteúdo de áudios')
+  const auxIds = new Set<string>()
+  if (project.auxBuses !== undefined) {
+    if (!Array.isArray(project.auxBuses) || project.auxBuses.length > 32) throw new Error('A lista de auxiliares do backup é inválida.')
+    for (const value of project.auxBuses) {
+      const bus = asRecord(value)
+      if (!bus || typeof bus.id !== 'string' || !bus.id || auxIds.has(bus.id) ||
+        typeof bus.name !== 'string' || bus.name.length > 40 || typeof bus.mute !== 'boolean' ||
+        typeof bus.gainDb !== 'number' || !Number.isFinite(bus.gainDb) || bus.gainDb < -60 || bus.gainDb > 6) {
+        throw new Error('Um auxiliar do backup é inválido.')
+      }
+      auxIds.add(bus.id)
+    }
+  }
   if (project.markers !== undefined) {
     if (!Array.isArray(project.markers)) throw new Error('Os marcadores do backup são inválidos.')
     identifiers(project.markers, 'Lista de marcadores')
@@ -60,6 +87,31 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   const hasInvalidTrackLinks = (project.tracks as unknown[]).some((track) => {
     const item = asRecord(track)
     if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true
+    if (item?.inputDeviceId !== undefined && typeof item.inputDeviceId !== 'string') return true
+    if (item?.outputBusId !== undefined && (typeof item.outputBusId !== 'string' || !auxIds.has(item.outputBusId))) return true
+    if (item?.auxSends !== undefined) {
+      if (!Array.isArray(item.auxSends) || item.auxSends.length > MAX_AUX_SENDS) return true
+      const seen = new Set<string>()
+      for (const value of item.auxSends) {
+        const send = asRecord(value)
+        if (!send || typeof send.busId !== 'string' || send.busId === item.outputBusId || !auxIds.has(send.busId) || seen.has(send.busId) ||
+          typeof send.level !== 'number' || !Number.isFinite(send.level) || send.level < 0 || send.level > 1) return true
+        seen.add(send.busId)
+      }
+    }
+    if (item?.automation !== undefined) {
+      const automation = asRecord(item.automation)
+      if (!automation || (automation.mode !== 'off' && automation.mode !== 'read') ||
+        !validAutomationLane(automation.gainDb, -60, 6) || !validAutomationLane(automation.pan, -1, 1)) return true
+    }
+    const effectSettings = asRecord(item?.effects)
+    if (effectSettings?.eq !== undefined) {
+      const eq = asRecord(effectSettings.eq)
+      if (!eq || typeof eq.enabled !== 'boolean' || ['low', 'mid', 'high'].some((band) => {
+        const value = eq[band]
+        return typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > 18
+      })) return true
+    }
     const inserts = item?.vst3Inserts
     const hasInvalidInsert = inserts !== undefined && (!Array.isArray(inserts) || inserts.some((insert) => {
       const value = asRecord(insert)
