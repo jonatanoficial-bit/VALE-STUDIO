@@ -10,10 +10,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
 #include <iostream>
+#include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 struct ComApartment {
@@ -72,6 +78,10 @@ struct Device {
   std::atomic<float> inputPeak {0.f};
   std::atomic<bool> interrupted {false};
   std::atomic<bool> latencyChanged {false};
+  static constexpr uint32_t captureCapacity = 65536;
+  std::vector<float> capture;
+  std::atomic<uint32_t> captured {0}, drained {0};
+  std::atomic<bool> captureOverflow {false};
 
   ~Device() {
     if (running) driver->stop();
@@ -156,18 +166,39 @@ struct Device {
     if (index != 0 && index != 1) return;
     const auto* input = buffers[0].buffers[index];
     float peak = inputPeak.load(std::memory_order_relaxed);
+    const auto writeAt = captured.load(std::memory_order_relaxed);
+    const bool store = !capture.empty() && !captureOverflow.load(std::memory_order_relaxed)
+      && writeAt - drained.load(std::memory_order_acquire) <= captureCapacity - static_cast<uint32_t>(frames);
+    if (!capture.empty() && !store) captureOverflow.store(true);
     for (long frame = 0; frame < frames; ++frame) {
       const float sample = input ? readSample(input, channels[0].type, frame) : 0.f;
       const float clean = std::isfinite(sample) ? sample : 0.f;
       peak = std::max(peak, std::abs(clean));
+      if (store) capture[(writeAt + frame) % captureCapacity] = clean;
       for (int channel = 1; channel < 3; ++channel) {
         if (auto* target = buffers[channel].buffers[index])
           writeSample(target, channels[channel].type, frame, clean * monitorGain);
       }
     }
+    if (store) captured.store(writeAt + frames, std::memory_order_release);
     inputPeak.store(peak, std::memory_order_relaxed);
     blocks.fetch_add(1, std::memory_order_relaxed);
     if (outputReady) driver->outputReady();
+  }
+
+  void drainCapture(FILE* stream) {
+    if (capture.empty()) return;
+    auto readAt = drained.load(std::memory_order_relaxed);
+    const auto writeAt = captured.load(std::memory_order_acquire);
+    while (readAt != writeAt) {
+      const auto offset = readAt % captureCapacity;
+      const auto count = std::min(writeAt - readAt, captureCapacity - offset);
+      if (std::fwrite(capture.data() + offset, sizeof(float), count, stream) != count)
+        throw std::runtime_error("Could not send captured ASIO samples");
+      readAt += count;
+      drained.store(readAt, std::memory_order_release);
+    }
+    if (std::fflush(stream)) throw std::runtime_error("Could not flush captured ASIO samples");
   }
 
   void stop() {
@@ -229,6 +260,10 @@ void verifyMonitorConversion() {
   std::array<float, 4> left {}, right {};
   device.frames = static_cast<long>(input.size());
   device.monitorGain = 0.25f;
+  device.capture.resize(Device::captureCapacity);
+  const auto start = Device::captureCapacity - 2;
+  device.captured.store(start);
+  device.drained.store(start);
   device.buffers[0].buffers[0] = input.data();
   device.buffers[1].buffers[0] = left.data();
   device.buffers[2].buffers[0] = right.data();
@@ -238,6 +273,13 @@ void verifyMonitorConversion() {
   const std::array<float, 4> expected {0.125f, -0.125f, 0.f, 0.0625f};
   if (left != expected || right != expected || device.blocks.load() != 1 || device.inputPeak.load() != 0.5f)
     throw std::runtime_error("Native input monitoring conversion failed");
+  if (device.captured.load() != start + 4 || device.capture[start] != 0.5f
+      || device.capture[start + 1] != -0.5f || device.capture[0] != 0.f || device.capture[1] != 0.25f)
+    throw std::runtime_error("Native capture ring did not retain the input block");
+  device.drained.store(device.captured.load() - Device::captureCapacity);
+  device.onBlock(0);
+  if (!device.captureOverflow.load() || device.captured.load() != start + 4)
+    throw std::runtime_error("Native capture ring failed to report an overflow");
 }
 
 void pumpMessages() {
@@ -245,8 +287,8 @@ void pumpMessages() {
   while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
 }
 
-void report(const Device& device) {
-  std::cout << "{\"inputs\":" << device.inputs << ",\"outputs\":" << device.outputs
+void report(const Device& device, std::ostream& output = std::cout) {
+  output << "{\"inputs\":" << device.inputs << ",\"outputs\":" << device.outputs
     << ",\"sampleRate\":" << device.rate << ",\"minimum\":" << device.minimum << ",\"maximum\":" << device.maximum
     << ",\"preferred\":" << device.preferred << ",\"granularity\":" << device.step
     << ",\"frames\":" << device.frames << ",\"inputLatency\":" << device.inputLatency
@@ -254,12 +296,18 @@ void report(const Device& device) {
     << ",\"inputPeak\":" << device.inputPeak.load() << "}" << std::endl;
 }
 
-void monitor(Device& device, long frames, double rate, long input, long output) {
+void monitor(Device& device, long frames, double rate, long input, long output, FILE* capturePipe, float gain) {
   const HANDLE parent = GetStdHandle(STD_INPUT_HANDLE);
   if (GetFileType(parent) != FILE_TYPE_PIPE) throw std::runtime_error("Monitoring requires a parent process pipe");
   device.setSampleRate(rate);
+  const long blockSize = frames == 0 ? device.preferred : frames;
+  if (capturePipe) {
+    if (blockSize <= 0 || blockSize > Device::captureCapacity / 2)
+      throw std::runtime_error("Unsupported capture block size");
+    device.capture.resize(Device::captureCapacity);
+  }
   // Keep the initial return level conservative. Audio stays on the driver callback.
-  device.start(frames == 0 ? device.preferred : frames, input, output, 0.125f);
+  device.start(blockSize, input, output, gain);
   auto lastCallback = std::chrono::steady_clock::now();
   unsigned seen = 0;
   while (PeekNamedPipe(parent, nullptr, 0, nullptr, nullptr, nullptr)) {
@@ -269,17 +317,29 @@ void monitor(Device& device, long frames, double rate, long input, long output) 
     const auto count = device.blocks.load(std::memory_order_relaxed);
     if (count != seen) {
       if (!seen) {
-        std::cout << "VALE_ASIO_READY ";
-        report(device);
+        if (capturePipe) {
+          std::ostringstream metadata;
+          report(device, metadata);
+          const auto line = "VALE_ASIO_READY " + metadata.str();
+          if (std::fwrite(line.data(), 1, line.size(), capturePipe) != line.size() || std::fflush(capturePipe))
+            throw std::runtime_error("Could not confirm ASIO capture");
+        } else {
+          std::cout << "VALE_ASIO_READY ";
+          report(device);
+        }
       }
       seen = count;
       lastCallback = now;
     } else if (now - lastCallback > std::chrono::seconds(2)) {
       throw std::runtime_error("The ASIO driver stopped delivering audio callbacks");
     }
+    if (seen) device.drainCapture(capturePipe);
+    if (device.captureOverflow.load()) throw std::runtime_error("ASIO capture queue overflowed");
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   device.stop();
+  if (seen) device.drainCapture(capturePipe);
+  if (device.captureOverflow.load()) throw std::runtime_error("ASIO capture queue overflowed");
 }
 }
 
@@ -291,16 +351,28 @@ int wmain(int argc, wchar_t** argv) {
       std::cout << "Native input monitoring conversion passed\n";
       return 0;
     }
-    if (argc < 3 || (action != L"--probe" && action != L"--verify" && action != L"--monitor")) {
-      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --monitor DRIVER FRAMES RATE INPUT OUTPUT | --self-test\n";
+    const bool capturing = action == L"--capture";
+    if (argc < 3 || (action != L"--probe" && action != L"--verify" && action != L"--monitor" && !capturing)) {
+      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --monitor DRIVER FRAMES RATE INPUT OUTPUT | --capture DRIVER FRAMES RATE INPUT OUTPUT RETURN | --self-test\n";
       return 64;
+    }
+    std::unique_ptr<FILE, decltype(&std::fclose)> capturePipe(nullptr, std::fclose);
+    if (capturing) {
+      const int fd = _dup(_fileno(stdout));
+      if (fd < 0) throw std::runtime_error("Could not duplicate the capture pipe");
+      capturePipe.reset(_fdopen(fd, "wb"));
+      if (!capturePipe) { _close(fd); throw std::runtime_error("Could not open the capture pipe"); }
+      if (_setmode(fd, _O_BINARY) < 0 || _dup2(_fileno(stderr), _fileno(stdout)) < 0
+          || !SetStdHandle(STD_OUTPUT_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stderr)))))
+        throw std::runtime_error("Could not isolate the capture pipe");
     }
     ComApartment com;
     Device device;
     device.open(argv[2]);
-    if (action == L"--monitor") {
-      if (argc != 7) throw std::runtime_error("Specify frames, rate and both channel indexes");
-      monitor(device, std::stol(argv[3]), std::stod(argv[4]), std::stol(argv[5]), std::stol(argv[6]));
+    if (action == L"--monitor" || capturing) {
+      if (argc != (capturing ? 8 : 7)) throw std::runtime_error("Specify frames, rate and both channel indexes");
+      const float gain = !capturing || std::wstring(argv[7]) == L"1" ? 0.125f : 0.f;
+      monitor(device, std::stol(argv[3]), std::stod(argv[4]), std::stol(argv[5]), std::stol(argv[6]), capturePipe.get(), gain);
       return 0;
     }
     const bool verify = action == L"--verify";

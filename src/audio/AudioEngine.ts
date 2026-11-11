@@ -2,7 +2,7 @@ import type { AudioProject, Clip, MonitorMode, Track } from '../domain/model'
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
-import { isDesktopRuntime, openVstStream } from '../platform/desktop'
+import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type AsioSettings } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
 type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; showEditor: () => void }
@@ -124,6 +124,10 @@ export class AudioEngine {
   private recordingTrackId?: string
   private recordingStartFrame = 0
   private recordingSettings?: MediaTrackSettings
+  private asioCapture?: {
+    rate: number; frames: number; peak: number; rms: number; timer?: number
+    pending?: Promise<void>; error?: string; stopping: boolean
+  }
   private resolveFlush?: () => void
   private pendingDurableChunks: Float32Array[] = []
   private pendingDurableFrames = 0
@@ -277,6 +281,9 @@ export class AudioEngine {
   }
 
   getCurrentFrame(projectRate: number): number {
+    if (this.asioCapture) {
+      return this.recordingStartFrame + Math.round(this.asioCapture.frames * projectRate / this.asioCapture.rate)
+    }
     if (!this.playing || !this.context) return this.playheadStartFrame
     return Math.max(this.playheadStartFrame, this.playheadStartFrame + Math.round((this.context.currentTime - this.playStartedAt) * projectRate))
   }
@@ -417,23 +424,22 @@ export class AudioEngine {
 
   private applyClipEnvelope(gain: GainNode, clip: Clip, sourceAt: number, elapsedFrames: number, playableFrames: number, projectRate: number): void {
     const baseLevel = dbToGain(clip.gainDb)
-    const sourceEnd = sourceAt + playableFrames / projectRate
-    gain.gain.setValueAtTime(baseLevel, sourceAt)
-
-    if (clip.fadeInFrames > 0 && elapsedFrames < clip.fadeInFrames) {
-      const initialLevel = Math.max(0, Math.min(1, elapsedFrames / clip.fadeInFrames)) * baseLevel
-      const fadeInEnd = sourceAt + Math.min(playableFrames, clip.fadeInFrames - elapsedFrames) / projectRate
-      gain.gain.setValueAtTime(initialLevel, sourceAt)
-      gain.gain.linearRampToValueAtTime(baseLevel, fadeInEnd)
-    }
-
-    const fadeOutStartFrame = Math.max(0, clip.durationFrames - clip.fadeOutFrames)
     const endFrame = elapsedFrames + playableFrames
-    if (clip.fadeOutFrames > 0 && endFrame > fadeOutStartFrame) {
-      const fadeOutAt = sourceAt + Math.max(0, fadeOutStartFrame - elapsedFrames) / projectRate
-      const endingLevel = Math.max(0, Math.min(1, (clip.durationFrames - endFrame) / clip.fadeOutFrames)) * baseLevel
-      gain.gain.setValueAtTime(baseLevel, fadeOutAt)
-      gain.gain.linearRampToValueAtTime(endingLevel, sourceEnd)
+    const fadeIn = Math.max(0, clip.fadeInFrames)
+    const fadeOut = Math.max(0, clip.fadeOutFrames)
+    const levelAt = (frame: number) => baseLevel * Math.max(0, Math.min(
+      1, fadeIn ? frame / fadeIn : 1, fadeOut ? (clip.durationFrames - frame) / fadeOut : 1,
+    ))
+    gain.gain.setValueAtTime(levelAt(elapsedFrames), sourceAt)
+    if (fadeIn || fadeOut) {
+      const boundaries = fadeIn + fadeOut > clip.durationFrames
+        ? [clip.durationFrames * fadeIn / (fadeIn + fadeOut)]
+        : [fadeIn, clip.durationFrames - fadeOut]
+      for (const frame of [...new Set([...boundaries, endFrame])]) {
+        if (frame > elapsedFrames && frame <= endFrame) {
+          gain.gain.linearRampToValueAtTime(levelAt(frame), sourceAt + (frame - elapsedFrames) / projectRate)
+        }
+      }
     }
   }
 
@@ -744,6 +750,15 @@ export class AudioEngine {
     const graph = this.liveGraphs.get(trackId)
     this.inputSource.connect(this.monitorGain).connect(graph?.input ?? graph?.highPass ?? this.context.destination)
 
+    this.prepareRecording(trackId, project.audioSampleRate, onPcmChunk)
+    this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[] }>) => {
+      if (data.type === 'pcm' && data.channels?.[0]) this.acceptRecordingPcm(new Float32Array(data.channels[0]))
+      if (data.type === 'flushed') this.resolveFlush?.()
+    }
+    return { inputSettings: this.recordingSettings, startFrame: this.recordingStartFrame }
+  }
+
+  private prepareRecording(trackId: string, projectRate: number, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): void {
     this.recordingChunks = []
     this.pendingDurableChunks = []
     this.pendingDurableFrames = 0
@@ -755,20 +770,54 @@ export class AudioEngine {
     this.durableFailure = undefined
     this.persistRecordingChunk = onPcmChunk
     this.recordingTrackId = trackId
-    this.recordingStartFrame = this.getCurrentFrame(project.audioSampleRate)
-    this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[] }>) => {
-      if (data.type === 'pcm' && data.channels?.[0]) {
-        const pcm = new Float32Array(data.channels[0])
-        this.recordingChunks.push(pcm)
-        if (this.persistRecordingChunk) {
-          this.pendingDurableChunks.push(pcm)
-          this.pendingDurableFrames += pcm.length
-          if (this.pendingDurableFrames >= 8192) this.queueDurableChunk()
-        }
-      }
-      if (data.type === 'flushed') this.resolveFlush?.()
+    this.recordingStartFrame = this.getCurrentFrame(projectRate)
+  }
+
+  private acceptRecordingPcm(pcm: Float32Array): void {
+    if (!pcm.length) return
+    this.recordingChunks.push(pcm)
+    if (this.persistRecordingChunk) {
+      this.pendingDurableChunks.push(pcm)
+      this.pendingDurableFrames += pcm.length
+      if (this.pendingDurableFrames >= 8192) this.queueDurableChunk()
     }
-    return { inputSettings: this.recordingSettings, startFrame: this.recordingStartFrame }
+    const capture = this.asioCapture
+    if (capture) {
+      capture.frames += pcm.length
+      let peak = 0
+      let energy = 0
+      for (const sample of pcm) { peak = Math.max(peak, Math.abs(sample)); energy += sample * sample }
+      capture.peak = peak
+      capture.rms = Math.sqrt(energy / pcm.length)
+    }
+  }
+
+  async startAsioRecording(trackId: string, projectRate: number, settings: AsioSettings, dryReturn: boolean,
+    onPcmChunk: (chunk: RecordingPcmChunk) => Promise<void>, onFailure: (reason: string) => void): Promise<RecordingStart> {
+    if (!this.context || this.playing || this.recordingTrackId) throw new Error('Pare o transporte antes de gravar pelo ASIO.')
+    const info = await startAsioMonitor({ ...settings, capture: true, dryReturn })
+    if (info.sampleRate !== settings.sampleRate) {
+      await finishAsioCapture()
+      throw new Error('O driver abriu com uma taxa diferente da solicitada.')
+    }
+    this.recordingSettings = undefined
+    this.prepareRecording(trackId, projectRate, onPcmChunk)
+    const capture: NonNullable<AudioEngine['asioCapture']> = { rate: info.sampleRate, frames: 0, peak: 0, rms: 0, stopping: false }
+    this.asioCapture = capture
+    const poll = () => {
+      if (capture.stopping) return
+      capture.pending = readAsioCapture().then((packet) => {
+        this.acceptRecordingPcm(Float32Array.from(packet.samples))
+        if (packet.error || packet.ended) throw new Error(packet.error ?? 'O driver ASIO interrompeu a captura.')
+      }).catch((error) => {
+        capture.error = String(error)
+        if (!capture.stopping) onFailure(capture.error)
+      }).finally(() => {
+        if (!capture.stopping && !capture.error) capture.timer = window.setTimeout(poll, 80)
+      })
+    }
+    capture.timer = window.setTimeout(poll, 80)
+    return { startFrame: this.recordingStartFrame }
   }
 
   setMonitorMode(mode: MonitorMode): void {
@@ -777,6 +826,7 @@ export class AudioEngine {
   }
 
   getInputMeter(): { peak: number; rms: number } | undefined {
+    if (this.asioCapture) return { peak: this.asioCapture.peak, rms: this.asioCapture.rms }
     if (!this.inputAnalyser) return undefined
     const data = new Float32Array(this.inputAnalyser.fftSize)
     this.inputAnalyser.getFloatTimeDomainData(data)
@@ -804,31 +854,55 @@ export class AudioEngine {
   }
 
   async stopRecording(): Promise<CapturedRecording | undefined> {
-    if (!this.context || !this.recordingTrackId || !this.recorder) return undefined
-    await new Promise<void>((resolve) => {
-      this.resolveFlush = resolve
-      this.recorder!.port.postMessage({ type: 'stop' })
-    })
+    if (!this.context || !this.recordingTrackId) return undefined
+    const capture = this.asioCapture
+    if (!capture && !this.recorder) return undefined
+    if (capture) {
+      capture.stopping = true
+      window.clearTimeout(capture.timer)
+      await capture.pending
+      try {
+        const tail = await finishAsioCapture()
+        this.acceptRecordingPcm(Float32Array.from(tail.samples))
+        capture.error ??= tail.error ?? undefined
+      } catch (error) {
+        capture.error ??= String(error)
+      }
+    } else {
+      await new Promise<void>((resolve) => {
+        this.resolveFlush = resolve
+        this.recorder!.port.postMessage({ type: 'stop' })
+      })
+    }
     this.queueDurableChunk()
     await this.durableWrite
-    const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length, 0)
-    const buffer = this.context.createBuffer(1, Math.max(1, frames), this.context.sampleRate)
-    const output = buffer.getChannelData(0)
-    let offset = 0
-    this.recordingChunks.forEach((chunk) => {
-      output.set(chunk, offset)
-      offset += chunk.length
-    })
-    const recording: CapturedRecording = {
-      blob: encodeWav(buffer, 32),
-      buffer,
-      peaks: buildPeaks(buffer),
-      frames,
-      channels: 1,
-      sampleRate: this.context.sampleRate,
-      inputSettings: this.recordingSettings,
-      durability: { persistedChunks: this.persistedChunks, persistedFrames: this.persistedFrames, error: this.durableFailure },
+    try {
+      if (capture?.error) throw new Error(capture.error)
+      const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length, 0)
+      const sampleRate = capture?.rate ?? this.context.sampleRate
+      const buffer = this.context.createBuffer(1, Math.max(1, frames), sampleRate)
+      const output = buffer.getChannelData(0)
+      let offset = 0
+      for (const chunk of this.recordingChunks) {
+        output.set(chunk, offset)
+        offset += chunk.length
+      }
+      return {
+        blob: encodeWav(buffer, 32),
+        buffer,
+        peaks: buildPeaks(buffer),
+        frames,
+        channels: 1,
+        sampleRate,
+        inputSettings: this.recordingSettings,
+        durability: { persistedChunks: this.persistedChunks, persistedFrames: this.persistedFrames, error: this.durableFailure },
+      }
+    } finally {
+      this.clearRecording()
     }
+  }
+
+  private clearRecording(): void {
     safeDisconnect(this.inputSource)
     safeDisconnect(this.inputAnalyser)
     safeDisconnect(this.recorder)
@@ -840,12 +914,12 @@ export class AudioEngine {
     this.recorder = undefined
     this.monitorGain = undefined
     this.recordingTrackId = undefined
+    this.asioCapture = undefined
     this.recordingChunks = []
     this.resolveFlush = undefined
     this.pendingDurableChunks = []
     this.pendingDurableFrames = 0
     this.persistRecordingChunk = undefined
-    return recording
   }
 
   getRecordingStartFrame(): number {

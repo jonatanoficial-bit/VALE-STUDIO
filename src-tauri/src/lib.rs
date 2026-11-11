@@ -243,7 +243,8 @@ pub fn run() {
             desktop_runtime, pick_vst3_directory, scan_vst3, scan_default_vst3, probe_vst3,
             vst_stream::open_vst_stream, vst_stream::process_vst_stream, vst_stream::close_vst_stream,
             asio_monitor::asio_monitor_available, asio_monitor::start_asio_monitor,
-            asio_monitor::stop_asio_monitor, asio_monitor::asio_monitor_running
+            asio_monitor::stop_asio_monitor, asio_monitor::asio_monitor_running,
+            asio_monitor::read_asio_capture, asio_monitor::finish_asio_capture
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar Vale Studio Desktop");

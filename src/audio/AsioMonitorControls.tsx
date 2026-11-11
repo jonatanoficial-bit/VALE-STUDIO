@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { asioMonitorAvailable, asioMonitorRunning, startAsioMonitor, stopAsioMonitor, type AsioMonitorInfo } from '../platform/desktop'
+import { asioMonitorAvailable, asioMonitorRunning, startAsioMonitor, stopAsioMonitor, type AsioMonitorInfo, type AsioSettings } from '../platform/desktop'
 
 type Props = {
   armedTrackId?: string
   blocked: boolean
   setBusy: (value: boolean) => void
+  onRecord: (settings: AsioSettings, dryReturn: boolean) => Promise<void>
 }
 
-export function AsioMonitorControls({ armedTrackId, blocked, setBusy }: Props) {
+export function AsioMonitorControls({ armedTrackId, blocked, setBusy, onRecord }: Props) {
   const [available, setAvailable] = useState(false)
   const [pending, setPending] = useState(false)
   const [info, setInfo] = useState<AsioMonitorInfo>()
@@ -16,6 +17,7 @@ export function AsioMonitorControls({ armedTrackId, blocked, setBusy }: Props) {
   const [rate, setRate] = useState(48000)
   const [input, setInput] = useState(1)
   const [output, setOutput] = useState(1)
+  const [dryReturn, setDryReturn] = useState(false)
   const owner = useRef<string | undefined>(undefined)
 
   useEffect(() => {
@@ -91,15 +93,18 @@ export function AsioMonitorControls({ armedTrackId, blocked, setBusy }: Props) {
   if (!available) return null
   return <section className="asio-monitor-controls" aria-label="Retorno ASIO4ALL em desenvolvimento">
     <strong>Retorno seco ASIO4ALL</strong>
-    <fieldset disabled={pending || Boolean(info)}>
+    <fieldset disabled={pending || Boolean(info) || blocked}>
       <label>Buffer (frames)<input type="number" min={0} max={32768} value={frames} onChange={(event) => setFrames(Number(event.target.value))} /></label>
       <label>Taxa (Hz)<input type="number" min={8000} max={192000} step={1} value={rate} onChange={(event) => setRate(Number(event.target.value))} /></label>
       <label>Entrada<input type="number" min={1} max={256} value={input} onChange={(event) => setInput(Number(event.target.value))} /></label>
       <label>Saída inicial<input type="number" min={1} max={256} value={output} onChange={(event) => setOutput(Number(event.target.value))} /></label>
+      <label><input type="checkbox" checked={dryReturn} onChange={(event) => setDryReturn(event.target.checked)} />Retorno na gravação</label>
     </fieldset>
     <button type="button" className="button secondary" onClick={() => void toggle()} disabled={pending || (!info && (blocked || !armedTrackId))}>
       {pending ? 'Aguardando driver…' : info ? 'Desligar retorno' : 'Ouvir pista armada'}
     </button>
+    <button type="button" className="button record-action" disabled={blocked || pending || Boolean(info) || !armedTrackId}
+      onClick={() => void onRecord({ frames, sampleRate: rate, input: input - 1, output: output - 1 }, dryReturn)}>Gravar via ASIO</button>
     {info ? <output>{info.frames} frames · {info.sampleRate} Hz · {((info.inputLatency + info.outputLatency) * 1000 / info.sampleRate).toFixed(1)} ms reportados pelo driver</output>
       : <small>Arme uma pista de áudio, pare o transporte e use fones. Buffer 0 usa o valor preferido do driver.</small>}
     {error && <p role="alert">{error}</p>}

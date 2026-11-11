@@ -204,6 +204,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .asio-monitor-controls label { display: grid; gap: 3px; }
 .asio-monitor-controls input { width: 78px; padding: 4px; background: #102336; border: 1px solid #345977; color: #dff5ff; border-radius: 5px; }
 .asio-monitor-controls p { color: #ffb5ba; margin: 0; }
+.clip-lane .audio-clip.clip-trim { cursor: ew-resize; box-shadow: inset 3px 0 #c0ebff, inset -3px 0 #c0ebff; }
 @media (min-width: 840px) { .timeline-grid { --track-header-width: 196px; } }
 @media (min-width: 1100px) { .timeline-grid { --track-header-width: 224px; } }
 @media (max-width: 540px) { .timeline-grid { --track-header-width: 132px; } }

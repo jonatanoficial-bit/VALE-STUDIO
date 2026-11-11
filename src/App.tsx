@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { AudioEngine, type AudioCapabilities } from './audio/AudioEngine'
+import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
+import type { AsioSettings } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
@@ -88,48 +89,67 @@ function MidiRoll({ notes, color, framesPerBeat, timelineFrames }: { notes: Midi
   </div>
 }
 
-function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, selected, editable, onSelect, onMove }: {
-  clip: Clip; asset?: MediaAsset; color: string; timelineFrames: number; snapFrames?: number; selected: boolean; editable: boolean
-  onSelect: () => void; onMove: (frame: number) => void
+function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, tool, selected, editable, onSelect, onEdit }: {
+  clip: Clip; asset?: MediaAsset; color: string; timelineFrames: number; snapFrames?: number; tool: 'move' | 'trim'; selected: boolean; editable: boolean
+  onSelect: () => void; onEdit: (clip: Clip) => void
 }) {
-  const gesture = useRef<{ id: number; x: number; width: number; moved: boolean } | null>(null)
-  const [draft, setDraft] = useState<number>()
+  const gesture = useRef<{ id: number; x: number; width: number; moved: boolean; mode: 'move' | 'start' | 'end' } | null>(null)
+  const [draft, setDraft] = useState<Clip>()
+  const visible = draft ?? clip
   const peaks = useMemo(() => {
     if (!asset?.durationFrames) return [0]
     const scale = asset.peaks.length / asset.durationFrames
-    return asset.peaks.slice(Math.floor(clip.sourceOffsetFrame * scale), Math.ceil((clip.sourceOffsetFrame + clip.durationFrames) * scale))
-  }, [asset, clip.sourceOffsetFrame, clip.durationFrames])
+    return asset.peaks.slice(Math.floor(visible.sourceOffsetFrame * scale), Math.ceil((visible.sourceOffsetFrame + visible.durationFrames) * scale))
+  }, [asset, visible.sourceOffsetFrame, visible.durationFrames])
 
-  function targetFrame(clientX: number, start: NonNullable<typeof gesture.current>) {
+  function targetClip(clientX: number, start: NonNullable<typeof gesture.current>): Clip {
     const delta = (clientX - start.x) / start.width * timelineFrames
-    const raw = clip.timelineStartFrame + delta
-    const aligned = snapFrames ? Math.round(raw / snapFrames) * snapFrames : raw
-    return Math.max(0, Math.min(timelineFrames - clip.durationFrames, Math.round(aligned)))
+    const edge = clip.timelineStartFrame + (start.mode === 'end' ? clip.durationFrames : 0)
+    const raw = edge + delta
+    const target = Math.round(snapFrames ? Math.round(raw / snapFrames) * snapFrames : raw)
+    if (start.mode === 'move') {
+      return { ...clip, timelineStartFrame: Math.max(0, Math.min(timelineFrames - clip.durationFrames, target)) }
+    }
+    const minLength = Math.min(128, clip.durationFrames)
+    const moveStart = start.mode === 'start'
+    const shift = moveStart
+      ? Math.max(-Math.min(clip.sourceOffsetFrame, clip.timelineStartFrame), Math.min(clip.durationFrames - minLength, target - edge))
+      : 0
+    const duration = moveStart ? clip.durationFrames - shift : Math.max(minLength, Math.min(
+      (asset?.durationFrames ?? clip.sourceOffsetFrame + clip.durationFrames) - clip.sourceOffsetFrame,
+      timelineFrames - clip.timelineStartFrame,
+      target - clip.timelineStartFrame,
+    ))
+    return { ...clip, timelineStartFrame: clip.timelineStartFrame + shift, sourceOffsetFrame: clip.sourceOffsetFrame + shift,
+      durationFrames: duration, fadeInFrames: Math.min(clip.fadeInFrames, Math.floor(duration / 2)),
+      fadeOutFrames: Math.min(clip.fadeOutFrames, Math.floor(duration / 2)) }
   }
 
-  return <button type="button" className={`audio-clip ${selected ? 'selected' : ''} ${draft !== undefined ? 'clip-moving' : ''}`}
-    style={{ left: `${(draft ?? clip.timelineStartFrame) / timelineFrames * 100}%`, width: `${clip.durationFrames / timelineFrames * 100}%`, '--clip-color': color } as React.CSSProperties}
+  return <button type="button" className={`audio-clip ${selected ? 'selected' : ''} ${draft ? 'clip-moving' : ''} ${tool === 'trim' ? 'clip-trim' : ''}`}
+    style={{ left: `${visible.timelineStartFrame / timelineFrames * 100}%`, width: `${visible.durationFrames / timelineFrames * 100}%`, '--clip-color': color } as React.CSSProperties}
     aria-label={`Selecionar clipe ${asset?.name ?? 'gravado'}`}
     onClick={(event) => { event.stopPropagation(); onSelect() }}
     onPointerDown={(event) => {
       if (!editable || !event.isPrimary || event.button !== 0) return
       const width = event.currentTarget.parentElement?.getBoundingClientRect().width ?? 0
       if (width <= 0) return
-      gesture.current = { id: event.pointerId, x: event.clientX, width, moved: false }
+      const bounds = event.currentTarget.getBoundingClientRect()
+      const mode = tool === 'move' ? 'move' : event.clientX < bounds.left + bounds.width / 2 ? 'start' : 'end'
+      gesture.current = { id: event.pointerId, x: event.clientX, width, moved: false, mode }
       event.currentTarget.setPointerCapture(event.pointerId)
     }}
     onPointerMove={(event) => {
       const start = gesture.current
       if (!start || start.id !== event.pointerId || (!start.moved && Math.abs(event.clientX - start.x) < 4)) return
       start.moved = true
-      setDraft(targetFrame(event.clientX, start))
+      setDraft(targetClip(event.clientX, start))
     }}
     onPointerUp={(event) => {
       const start = gesture.current
       if (!start || start.id !== event.pointerId) return
       gesture.current = null
       setDraft(undefined)
-      if (editable && start.moved) { onSelect(); onMove(targetFrame(event.clientX, start)) }
+      if (editable && start.moved) { onSelect(); onEdit(targetClip(event.clientX, start)) }
     }}
     onLostPointerCapture={() => { gesture.current = null; setDraft(undefined) }}>
     <Waveform peaks={peaks} color={color} />
@@ -188,6 +208,8 @@ export default function App() {
   const [storage, setStorage] = useState<{ usage?: number; quota?: number; persistent?: boolean }>()
   const [isPlaying, setIsPlaying] = useState(false)
   const [asioBusy, setAsioBusy] = useState(false)
+  const recordTransition = useRef(false)
+  const [asioRecording, setAsioRecording] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [isMetronome, setIsMetronome] = useState(false)
@@ -218,6 +240,7 @@ export default function App() {
   const [dropTrackId, setDropTrackId] = useState<string>()
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [snapToBeat, setSnapToBeat] = useState(false)
+  const [clipTool, setClipTool] = useState<'move' | 'trim'>('move')
   const [rulerMode, setRulerMode] = useState<'time' | 'bars'>('time')
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
   const trackDialog = useRef<HTMLDialogElement>(null)
@@ -678,7 +701,7 @@ export default function App() {
   }
 
   async function togglePlayback() {
-    if (asioBusy) { setToast({ tone: 'info', text: 'Desligue o retorno ASIO para usar o transporte.' }); return }
+    if (asioBusy || asioRecording || recordTransition.current) { setToast({ tone: 'info', text: 'Encerre a captura ou o retorno antes de usar o transporte.' }); return }
     if (!project) return
     if (!capabilities && !await activateAudio()) return
     if (isPlaying) {
@@ -690,7 +713,7 @@ export default function App() {
   }
 
   function toggleMetronome() {
-    if (asioBusy) return
+    if (asioBusy || asioRecording || recordTransition.current) return
     if (!project || !capabilities) { void activateAudio(); return }
     if (isMetronome) {
       engineRef.current.stopMetronome()
@@ -701,17 +724,30 @@ export default function App() {
     }
   }
 
-  async function toggleRecording() {
+  async function toggleRecording(asio?: AsioSettings, dryReturn = false) {
+    if (recordTransition.current) return
+    recordTransition.current = true
+    try {
+      await changeRecording(asio, dryReturn)
+    } finally {
+      recordTransition.current = false
+    }
+  }
+
+  async function changeRecording(asio?: AsioSettings, dryReturn = false) {
     if (asioBusy) { setToast({ tone: 'info', text: 'Desligue o retorno ASIO antes de gravar pelo motor atual.' }); return }
-    if (!project || !selectedTrack) return
-    if (selectedTrack.kind === 'midi') {
+    if (!project) return
+    const recordingTrackId = isRecording ? activeDraftRef.current?.trackId : undefined
+    const recordTrack = recordingTrackId ? project.tracks.find((track) => track.id === recordingTrackId) : selectedTrack
+    if (!recordTrack) return
+    if (recordTrack.kind === 'midi') {
       if (isRecording) {
         finishMidiNotes()
         setIsRecording(false)
         setToast({ tone: 'success', text: 'Gravação MIDI concluída. As notas ficaram salvas nesta pista.' })
         return
       }
-      if (!selectedTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista MIDI antes de tocar em REC.' }); return }
+      if (!recordTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista MIDI antes de tocar em REC.' }); return }
       if (!midiReady) { await enableMidiInput(); return }
       if (!isPlaying && !await startPlayback(project)) return
       setIsRecording(true)
@@ -719,10 +755,19 @@ export default function App() {
       return
     }
     if (isRecording) {
-      const captured = await engineRef.current.stopRecording()
-      setIsRecording(false)
       const activeDraft = activeDraftRef.current
-      activeDraftRef.current = undefined
+      let captured
+      try {
+        captured = await engineRef.current.stopRecording()
+      } catch (error) {
+        setToast({ tone: 'error', text: `${String(error)} Os checkpoints confirmados continuam em Projeto → Recuperação.` })
+        void projectRepository.listTakeDrafts(project.id).then(setTakeDrafts)
+        return
+      } finally {
+        setIsRecording(false)
+        setAsioRecording(false)
+        activeDraftRef.current = undefined
+      }
       if (!captured || captured.frames < 128) {
         if (activeDraft) await projectRepository.discardTakeDraft(activeDraft.id).catch(() => undefined)
         setToast({ tone: 'error', text: 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' })
@@ -735,18 +780,18 @@ export default function App() {
       const assetId = makeId()
       const takeId = makeId()
       const asset: MediaAsset = {
-        id: assetId, name: `Take ${project.takes.filter((take) => take.trackId === selectedTrack.id).length + 1}.wav`, mimeType: 'audio/wav',
+        id: assetId, name: `Take ${project.takes.filter((take) => take.trackId === recordTrack.id).length + 1}.wav`, mimeType: 'audio/wav',
         sampleRate: captured.sampleRate, channels: captured.channels, frames: captured.frames,
         durationFrames: Math.round(captured.frames / captured.sampleRate * project.audioSampleRate), byteLength: captured.blob.size,
         peaks: captured.peaks, createdAt: new Date().toISOString(),
       }
       const startFrame = Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
-      const clip: Clip = { id: makeId(), assetId, trackId: selectedTrack.id, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
+      const clip: Clip = { id: makeId(), assetId, trackId: recordTrack.id, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
       const nextProject: AudioProject = {
         ...project,
         assets: [...project.assets, asset], clips: [...project.clips, clip],
-        tracks: project.tracks.map((track) => track.id !== selectedTrack.id ? track : { ...track, clipIds: [...track.clipIds, clip.id], takeIds: [...track.takeIds, takeId] }),
-        takes: [...project.takes.map((take) => take.trackId === selectedTrack.id ? { ...take, selected: false } : take), { id: takeId, assetId, trackId: selectedTrack.id, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames, createdAt: asset.createdAt, calibrationFrames: project.calibrationFrames, selected: true }],
+        tracks: project.tracks.map((track) => track.id !== recordTrack.id ? track : { ...track, clipIds: [...track.clipIds, clip.id], takeIds: [...track.takeIds, takeId] }),
+        takes: [...project.takes.map((take) => take.trackId === recordTrack.id ? { ...take, selected: false } : take), { id: takeId, assetId, trackId: recordTrack.id, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames, createdAt: asset.createdAt, calibrationFrames: project.calibrationFrames, selected: true }],
         updatedAt: new Date().toISOString(),
       }
       try {
@@ -763,23 +808,32 @@ export default function App() {
       }
       return
     }
-    if (!selectedTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista que receberá a gravação antes de tocar em REC.' }); return }
+    if (!recordTrack.armed) { setToast({ tone: 'error', text: 'Arme a pista que receberá a gravação antes de tocar em REC.' }); return }
     const audio = capabilities ?? await activateAudio()
     if (!audio) return
     const draftId = makeId()
     try {
-      if (!isPlaying && !await startPlayback(project)) return
-      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: selectedTrack.id, timelineStartFrame: engineRef.current.getCurrentFrame(project.audioSampleRate), sampleRate: audio.sampleRate, channels: 1 })
-      activeDraftRef.current = { id: draftId, projectId: project.id, trackId: selectedTrack.id }
-      const recording = await engineRef.current.startRecording(selectedTrack.id, project, selectedTrack.monitorMode, async (chunk) => {
+      if (asio && (isPlaying || isStarting || isMetronome || previewingTakeId)) throw new Error('Pare a reprodução antes de gravar pelo ASIO.')
+      if (asio && (!Number.isInteger(asio.sampleRate) || asio.sampleRate < 8000 || asio.sampleRate > 192000)) {
+        throw new Error('Selecione uma taxa ASIO entre 8.000 e 192.000 Hz.')
+      }
+      if (!asio && !isPlaying && !await startPlayback(project)) return
+      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: engineRef.current.getCurrentFrame(project.audioSampleRate), sampleRate: asio?.sampleRate ?? audio.sampleRate, channels: 1 })
+      activeDraftRef.current = { id: draftId, projectId: project.id, trackId: recordTrack.id }
+      const persistChunk = async (chunk: RecordingPcmChunk) => {
         await projectRepository.appendTakeDraftChunk({ ...chunk, draftId })
-      })
-      await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
+      }
+      const recording = asio
+        ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, persistChunk,
+          (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }))
+        : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, persistChunk)
+      if (!asio) await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
       setRecordFrom(recording.startFrame)
       setRecordingPeaks([])
       setIsRecording(true)
+      setAsioRecording(Boolean(asio))
       const agc = recording.inputSettings?.autoGainControl
-      setToast({ tone: 'info', text: agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
+      setToast({ tone: 'info', text: asio ? 'Capturando pelo ASIO4ALL com checkpoints locais.' : agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
     } catch (error) {
       if (engineRef.current.isRecording) await engineRef.current.stopRecording().catch(() => undefined)
       activeDraftRef.current = undefined
@@ -849,7 +903,7 @@ export default function App() {
   }
 
   async function previewTake(takeId: string) {
-    if (asioBusy) return
+    if (asioBusy || asioRecording || recordTransition.current) return
     if (!project) return
     const take = project.takes.find((item) => item.id === takeId)
     if (!take) return
@@ -911,8 +965,31 @@ export default function App() {
     } finally { setExporting(undefined) }
   }
 
-  function updateClip(action: 'moveLeft' | 'moveRight' | 'duplicate' | 'split' | 'fadeIn' | 'fadeOut' | 'remove') {
-    if (!project || !selectedClip) return
+  function updateClip(action: 'moveLeft' | 'moveRight' | 'duplicate' | 'split' | 'fadeIn' | 'fadeOut' | 'crossfade' | 'remove') {
+    if (!project || !selectedClip || isPlaying || isRecording) return
+    if (action === 'crossfade') {
+      const current = project.clips.filter((clip) => clip.trackId === selectedClip.trackId
+        && (!clip.takeId || project.takes.find((take) => take.id === clip.takeId)?.selected !== false))
+        .sort((left, right) => left.timelineStartFrame - right.timelineStartFrame)
+      const index = current.findIndex((clip) => clip.id === selectedClip.id)
+      const pair = [[current[index], current[index + 1]], [current[index - 1], current[index]]].find(([left, right]) => {
+        if (!left || !right) return false
+        const overlap = left.timelineStartFrame + left.durationFrames - right.timelineStartFrame
+        return overlap > 0 && overlap <= Math.min(left.durationFrames - left.fadeInFrames, right.durationFrames - right.fadeOutFrames)
+      })
+      if (!pair) {
+        setToast({ tone: 'info', text: 'Sobreponha dois clipes consecutivos na mesma pista para criar o crossfade.' })
+        return
+      }
+      const [left, right] = pair
+      const overlap = left.timelineStartFrame + left.durationFrames - right.timelineStartFrame
+      updateProject((project) => ({ ...project, clips: project.clips.map((clip) => {
+        if (clip.id === left.id) return { ...clip, fadeOutFrames: overlap }
+        if (clip.id === right.id) return { ...clip, fadeInFrames: overlap }
+        return clip
+      }) }))
+      return
+    }
     const beat = Math.round(project.audioSampleRate * 60 / project.bpm)
     if (action === 'remove') {
       updateProject((current) => ({ ...current, clips: current.clips.filter((clip) => clip.id !== selectedClip.id), tracks: current.tracks.map((track) => ({ ...track, clipIds: track.clipIds.filter((id) => id !== selectedClip.id) })) }))
@@ -1010,8 +1087,8 @@ export default function App() {
   }
 
   return <main className="app-shell studio-shell">
-    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions">{updateReady && <button className="action-chip update-chip" onClick={() => void applyPendingUpdate()} disabled={isRecording} title={isRecording ? 'Finalize o take antes de atualizar' : 'Salvar e aplicar a nova versão'}>{isRecording ? 'Após take' : 'Atualizar'}</button>}<button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" onClick={() => { setProject(undefined); setView('tracks') }} aria-label="Voltar aos projetos">⌂</button></div></header>
-    <section className="transport"><button type="button" className="transport-button" onClick={() => { engineRef.current.stop(); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div>{desktopRuntime && <label className="transport-buffer">Buffer VST3
+    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions">{updateReady && <button className="action-chip update-chip" onClick={() => void applyPendingUpdate()} disabled={isRecording} title={isRecording ? 'Finalize o take antes de atualizar' : 'Salvar e aplicar a nova versão'}>{isRecording ? 'Após take' : 'Atualizar'}</button>}<button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; engineRef.current.stop(); setIsPlaying(false); setProject(undefined); setView('tracks') }} aria-label="Voltar aos projetos">⌂</button></div></header>
+    <section className="transport"><button type="button" className="transport-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; engineRef.current.stop(); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div>{desktopRuntime && <label className="transport-buffer">Buffer VST3
       <select aria-label="Buffer VST3 em frames" value={bufferFrames} disabled={isPlaying || isRecording || isStarting} onChange={(event) => {
         const value = Number(event.target.value) as NonNullable<AudioProject['vstBufferFrames']>
         updateProject((current) => ({ ...current, vstBufferFrames: value }))
@@ -1042,6 +1119,7 @@ export default function App() {
         armedTrackId={selectedTrack?.armed && selectedTrack.kind !== 'midi' ? selectedTrack.id : undefined}
         blocked={isPlaying || isStarting || isRecording || isMetronome || Boolean(previewingTakeId)}
         setBusy={setAsioBusy}
+        onRecord={toggleRecording}
       />}
       <div className="timeline-tools">
         <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
@@ -1056,6 +1134,9 @@ export default function App() {
             {(['2/4', '3/4', '4/4', '6/8', '12/8'] as const).map((signature) => <option key={signature}>{signature}</option>)}
           </select></label>
           <Toggle pressed={snapToBeat} label="Grade" onClick={() => setSnapToBeat(!snapToBeat)} />
+          <label>Ferramenta <select aria-label="Ferramenta de clipe" value={clipTool} onChange={(event) => setClipTool(event.target.value === 'trim' ? 'trim' : 'move')}>
+            <option value="move">Mover</option><option value="trim">Trim</option>
+          </select></label>
           <label>Zoom <select aria-label="Zoom horizontal da timeline" value={timelineZoom} onChange={(event) => setTimelineZoom(Number(event.target.value))}>
             <option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8×</option>
           </select></label>
@@ -1136,9 +1217,9 @@ export default function App() {
             <Waveform peaks={recordingPeaks.length ? recordingPeaks : [0]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {project.clips.filter((clip) => clip.trackId === track.id).map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
-            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? beatFrames : undefined} selected={selectedClipId === clip.id} editable={canEditTimeline}
+            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? beatFrames : undefined} tool={clipTool} selected={selectedClipId === clip.id} editable={canEditTimeline}
             onSelect={() => { if (!isRecording) { setSelectedTrackId(track.id); setSelectedClipId(clip.id) } }}
-            onMove={(frame) => updateProject((current) => ({ ...current, clips: current.clips.map((item) => item.id === clip.id ? { ...item, timelineStartFrame: frame } : item) }))} />)}
+            onEdit={(updated) => updateProject((current) => ({ ...current, clips: current.clips.map((item) => item.id === clip.id ? updated : item) }))} />)}
         </div>
       </article>)}
       <div className="playhead-overlay" aria-hidden="true"><i className="lane-playhead" style={{ left: playheadPosition }} /></div>
@@ -1157,20 +1238,23 @@ export default function App() {
         {project.markers?.some((marker) => marker.frame === playhead) && <button type="button" className="button secondary" disabled={!canEditTimeline}
           onClick={() => updateProject((current) => ({ ...current, markers: current.markers?.filter((marker) => marker.frame !== playhead) }))}>Remover marcadores no cursor</button>}
       </form>
-      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button>
+      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button><button disabled={!canEditTimeline} onClick={() => updateClip('crossfade')}>Crossfade</button>
         <label className="fade-control">Ganho do clipe (dB)
           <input type="number" min={-60} max={12} step={0.5} value={selectedClip.gainDb} disabled={!canEditTimeline} onChange={(event) => {
             const gain = Math.max(-60, Math.min(12, Number(event.target.value)))
             updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, gainDb: gain } : clip) }))
           }} />
-        </label>{(['fadeInFrames', 'fadeOutFrames'] as const).map((field) => <label className="fade-control" key={field}>
+        </label>{(['fadeInFrames', 'fadeOutFrames'] as const).map((field) => {
+          const other = field === 'fadeInFrames' ? selectedClip.fadeOutFrames : selectedClip.fadeInFrames
+          const maxFrames = Math.max(0, selectedClip.durationFrames - other)
+          return <label className="fade-control" key={field}>
           {field === 'fadeInFrames' ? 'Entrada (ms)' : 'Saída (ms)'}
-          <input type="number" min={0} max={Math.floor(selectedClip.durationFrames / 2 / project.audioSampleRate * 1000)} value={Math.round(selectedClip[field] / project.audioSampleRate * 1000)} onChange={(event) => {
+          <input type="number" min={0} max={Math.round(maxFrames / project.audioSampleRate * 1000)} disabled={!canEditTimeline} value={Math.round(selectedClip[field] / project.audioSampleRate * 1000)} onChange={(event) => {
             const frames = Math.round(Number(event.target.value) * project.audioSampleRate / 1000)
-            const value = Math.max(0, Math.min(Math.floor(selectedClip.durationFrames / 2), frames))
+            const value = Math.max(0, Math.min(maxFrames, frames))
             updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, [field]: value } : clip) }))
           }} />
-        </label>)}<button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
+        </label>})}<button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
 
     {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><span className="eyebrow">MIXER</span><h2>Controle real por pista.</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><div className="mixer-routing">
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? '＋ Insert VST3'}</button>

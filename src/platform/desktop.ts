@@ -68,10 +68,25 @@ export async function asioMonitorAvailable(): Promise<boolean> {
   return await nativeCore()?.invoke<boolean>('asio_monitor_available') ?? false
 }
 
-export async function startAsioMonitor(settings: { frames: number; sampleRate: number; input: number; output: number }): Promise<AsioMonitorInfo> {
+export type AsioSettings = { frames: number; sampleRate: number; input: number; output: number }
+export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string }
+
+export async function startAsioMonitor(settings: AsioSettings & { capture?: boolean; dryReturn?: boolean }): Promise<AsioMonitorInfo> {
   const core = nativeCore()
   if (!core) throw new Error('O retorno ASIO exige o Vale Studio Desktop.')
   return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)
+}
+
+export async function readAsioCapture(): Promise<AsioCapturePacket> {
+  const core = nativeCore()
+  if (!core) throw new Error('A captura ASIO exige o Vale Studio Desktop.')
+  return core.invoke('read_asio_capture')
+}
+
+export async function finishAsioCapture(): Promise<AsioCapturePacket> {
+  const core = nativeCore()
+  if (!core) throw new Error('A captura ASIO exige o Vale Studio Desktop.')
+  return core.invoke('finish_asio_capture')
 }
 
 export async function stopAsioMonitor(): Promise<void> {
