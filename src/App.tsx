@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities } from './audio/AudioEngine'
+import { AsioMonitorControls } from './audio/AsioMonitorControls'
 import { buildPeaks } from './audio/peaks'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
@@ -186,6 +187,7 @@ export default function App() {
   const [capabilities, setCapabilities] = useState<AudioCapabilities>()
   const [storage, setStorage] = useState<{ usage?: number; quota?: number; persistent?: boolean }>()
   const [isPlaying, setIsPlaying] = useState(false)
+  const [asioBusy, setAsioBusy] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [isMetronome, setIsMetronome] = useState(false)
@@ -676,6 +678,7 @@ export default function App() {
   }
 
   async function togglePlayback() {
+    if (asioBusy) { setToast({ tone: 'info', text: 'Desligue o retorno ASIO para usar o transporte.' }); return }
     if (!project) return
     if (!capabilities && !await activateAudio()) return
     if (isPlaying) {
@@ -687,6 +690,7 @@ export default function App() {
   }
 
   function toggleMetronome() {
+    if (asioBusy) return
     if (!project || !capabilities) { void activateAudio(); return }
     if (isMetronome) {
       engineRef.current.stopMetronome()
@@ -698,6 +702,7 @@ export default function App() {
   }
 
   async function toggleRecording() {
+    if (asioBusy) { setToast({ tone: 'info', text: 'Desligue o retorno ASIO antes de gravar pelo motor atual.' }); return }
     if (!project || !selectedTrack) return
     if (selectedTrack.kind === 'midi') {
       if (isRecording) {
@@ -844,6 +849,7 @@ export default function App() {
   }
 
   async function previewTake(takeId: string) {
+    if (asioBusy) return
     if (!project) return
     const take = project.takes.find((item) => item.id === takeId)
     if (!take) return
@@ -1031,6 +1037,12 @@ export default function App() {
           <button className="button record-action" disabled={!selectedTrack} onClick={() => void toggleRecording()}>{isRecording ? '■ Salvar take' : '● Gravar'}</button>
         </div>
       </div>
+      {desktopRuntime && <AsioMonitorControls
+        key={project.id}
+        armedTrackId={selectedTrack?.armed && selectedTrack.kind !== 'midi' ? selectedTrack.id : undefined}
+        blocked={isPlaying || isStarting || isRecording || isMetronome || Boolean(previewingTakeId)}
+        setBusy={setAsioBusy}
+      />}
       <div className="timeline-tools">
         <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
         <div className="timeline-zoom">

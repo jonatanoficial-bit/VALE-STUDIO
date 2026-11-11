@@ -57,6 +57,31 @@ export async function probeVst3Plugin(plugin: Pick<Vst3Plugin, 'bundlePath' | 'c
   return core.invoke<Vst3ProbeResult>('probe_vst3', { bundlePath: plugin.bundlePath, classId: plugin.classId })
 }
 
+export type AsioMonitorInfo = {
+  frames: number
+  sampleRate: number
+  inputLatency: number
+  outputLatency: number
+}
+
+export async function asioMonitorAvailable(): Promise<boolean> {
+  return await nativeCore()?.invoke<boolean>('asio_monitor_available') ?? false
+}
+
+export async function startAsioMonitor(settings: { frames: number; sampleRate: number; input: number; output: number }): Promise<AsioMonitorInfo> {
+  const core = nativeCore()
+  if (!core) throw new Error('O retorno ASIO exige o Vale Studio Desktop.')
+  return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)
+}
+
+export async function stopAsioMonitor(): Promise<void> {
+  await nativeCore()?.invoke('stop_asio_monitor')
+}
+
+export async function asioMonitorRunning(): Promise<boolean> {
+  return await nativeCore()?.invoke<boolean>('asio_monitor_running') ?? false
+}
+
 export async function openVstStream(plugin: Pick<Vst3Plugin, 'bundlePath' | 'classId'> & { id: string }, frames: number, sampleRate: number, bpm: number) {
   const core = nativeCore()
   if (!core) throw new Error('O processamento VST3 exige o Vale Studio Desktop.')

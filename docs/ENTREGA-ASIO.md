@@ -19,6 +19,8 @@ As imagens de referência guiam três áreas: Edição com cabeçalhos compactos
 
 Os marcos são pontos de controle no repositório. Um novo instalador depende da validação do áudio ASIO e das funções da entrega. O executável de diagnóstico em `native/asio-host` é compilado à parte, com um checkout local do SDK. Seu modo de verificação abre entrada e saída, mantém a saída muda e informa a quantidade de callbacks, sem gravar amostras em disco.
 
+No desktop de desenvolvimento, `VALE_ASIO_HOST_PATH` habilita o painel de retorno seco na tela de gravação. O painel exige uma pista de áudio armada e o transporte parado. O retorno passa pelo callback ASIO. Desarmar a pista ou sair da tela fecha a sessão, e o painel só mostra o buffer efetivo depois de receber o primeiro bloco. Este caminho ainda não é o motor de gravação e reprodução do projeto.
+
 No PC de teste, o ASIO4ALL v2 inicializou com dois canais de entrada e dois de saída. Todos pertenciam ao Bluetooth M10 em modo Hands-Free. A taxa inicial era 8 kHz e o driver retornou `ASE_NoClock` ao consultar 44,1 e 48 kHz. A tentativa com a configuração preferida iniciou sem entregar callbacks. Esse resultado impede validar retorno audível ou latência física neste estado. O teste com amostras simuladas cobre a conversão do sinal de entrada e a cópia com ganho para os dois canais de saída.
 
 ```powershell
@@ -27,4 +29,6 @@ cmake --build work/asio-host-build --config Release
 & ./work/asio-host-build/Release/vale-asio-host.exe --probe 'ASIO4ALL v2'
 & ./work/asio-host-build/Release/vale-asio-host.exe --verify 'ASIO4ALL v2' 256 48000
 & ./work/asio-host-build/Release/vale-asio-host.exe --self-test
+$env:VALE_ASIO_HOST_PATH = (Resolve-Path './work/asio-host-build/Release/vale-asio-host.exe').Path
+pnpm desktop:dev
 ```

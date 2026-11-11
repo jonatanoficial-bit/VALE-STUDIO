@@ -204,8 +204,9 @@ ASIOCallbacks Device::callbacks {
     [](long selector, long value, void*, double*) -> long {
       if (selector == kAsioSelectorSupported)
         return value == kAsioResetRequest || value == kAsioBufferSizeChange || value == kAsioResyncRequest
-            || value == kAsioLatenciesChanged || value == kAsioEngineVersion;
+            || value == kAsioLatenciesChanged || value == kAsioEngineVersion || value == kAsioSupportsTimeInfo;
       if (selector == kAsioEngineVersion) return 2;
+      if (selector == kAsioSupportsTimeInfo) return 1;
       if (selector == kAsioLatenciesChanged) {
         if (auto* device = Device::active.load()) device->latencyChanged.store(true);
         return 1;
@@ -216,7 +217,10 @@ ASIOCallbacks Device::callbacks {
       }
       return 0;
     },
-    nullptr,
+    [](ASIOTime*, long index, ASIOBool) -> ASIOTime* {
+      if (auto* device = Device::active.load()) device->onBlock(index);
+      return nullptr;
+    },
 };
 
 void verifyMonitorConversion() {
@@ -235,6 +239,48 @@ void verifyMonitorConversion() {
   if (left != expected || right != expected || device.blocks.load() != 1 || device.inputPeak.load() != 0.5f)
     throw std::runtime_error("Native input monitoring conversion failed");
 }
+
+void pumpMessages() {
+  MSG message {};
+  while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+}
+
+void report(const Device& device) {
+  std::cout << "{\"inputs\":" << device.inputs << ",\"outputs\":" << device.outputs
+    << ",\"sampleRate\":" << device.rate << ",\"minimum\":" << device.minimum << ",\"maximum\":" << device.maximum
+    << ",\"preferred\":" << device.preferred << ",\"granularity\":" << device.step
+    << ",\"frames\":" << device.frames << ",\"inputLatency\":" << device.inputLatency
+    << ",\"outputLatency\":" << device.outputLatency << ",\"callbacks\":" << device.blocks.load()
+    << ",\"inputPeak\":" << device.inputPeak.load() << "}" << std::endl;
+}
+
+void monitor(Device& device, long frames, double rate, long input, long output) {
+  const HANDLE parent = GetStdHandle(STD_INPUT_HANDLE);
+  if (GetFileType(parent) != FILE_TYPE_PIPE) throw std::runtime_error("Monitoring requires a parent process pipe");
+  device.setSampleRate(rate);
+  // Keep the initial return level conservative. Audio stays on the driver callback.
+  device.start(frames == 0 ? device.preferred : frames, input, output, 0.125f);
+  auto lastCallback = std::chrono::steady_clock::now();
+  unsigned seen = 0;
+  while (PeekNamedPipe(parent, nullptr, 0, nullptr, nullptr, nullptr)) {
+    pumpMessages();
+    if (device.interrupted.load()) throw std::runtime_error("ASIO requested a stream reset");
+    const auto now = std::chrono::steady_clock::now();
+    const auto count = device.blocks.load(std::memory_order_relaxed);
+    if (count != seen) {
+      if (!seen) {
+        std::cout << "VALE_ASIO_READY ";
+        report(device);
+      }
+      seen = count;
+      lastCallback = now;
+    } else if (now - lastCallback > std::chrono::seconds(2)) {
+      throw std::runtime_error("The ASIO driver stopped delivering audio callbacks");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  device.stop();
+}
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -245,13 +291,18 @@ int wmain(int argc, wchar_t** argv) {
       std::cout << "Native input monitoring conversion passed\n";
       return 0;
     }
-    if (argc < 3 || (action != L"--probe" && action != L"--verify")) {
-      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --self-test\n";
+    if (argc < 3 || (action != L"--probe" && action != L"--verify" && action != L"--monitor")) {
+      std::cerr << "Usage: vale-asio-host --probe DRIVER | --verify DRIVER FRAMES [RATE [INPUT OUTPUT]] | --monitor DRIVER FRAMES RATE INPUT OUTPUT | --self-test\n";
       return 64;
     }
     ComApartment com;
     Device device;
     device.open(argv[2]);
+    if (action == L"--monitor") {
+      if (argc != 7) throw std::runtime_error("Specify frames, rate and both channel indexes");
+      monitor(device, std::stol(argv[3]), std::stod(argv[4]), std::stol(argv[5]), std::stol(argv[6]));
+      return 0;
+    }
     const bool verify = action == L"--verify";
     if (!verify) device.listChannels();
     if (verify) {
@@ -262,20 +313,14 @@ int wmain(int argc, wchar_t** argv) {
         argc == 7 ? std::stol(argv[5]) : 0, argc == 7 ? std::stol(argv[6]) : 0, 0.f);
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(700);
       while (std::chrono::steady_clock::now() < deadline && !device.interrupted.load()) {
-        MSG message {};
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+        pumpMessages();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
       device.stop();
       if (device.interrupted.load()) throw std::runtime_error("ASIO requested a stream reset");
       if (!device.blocks.load()) throw std::runtime_error("ASIO start returned success, but the driver delivered no audio callbacks");
     }
-    std::cout << "{\"inputs\":" << device.inputs << ",\"outputs\":" << device.outputs
-      << ",\"sampleRate\":" << device.rate << ",\"minimum\":" << device.minimum << ",\"maximum\":" << device.maximum
-      << ",\"preferred\":" << device.preferred << ",\"granularity\":" << device.step
-      << ",\"frames\":" << device.frames << ",\"inputLatency\":" << device.inputLatency
-      << ",\"outputLatency\":" << device.outputLatency << ",\"callbacks\":" << device.blocks.load()
-      << ",\"inputPeak\":" << device.inputPeak.load() << "}\n";
+    report(device);
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

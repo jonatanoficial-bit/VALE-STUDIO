@@ -199,6 +199,11 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .marker-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .marker-form input { min-width: 130px; padding: 5px 8px; color: #e5f2fc; background: #142333; border: 1px solid #345977; border-radius: 6px; }
 .marker-form .button { min-height: 30px; padding: 4px 10px; }
+.asio-monitor-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; margin-top: 8px; background: #152838; border: 1px solid #36516b; border-radius: 8px; font-size: 12px; }
+.asio-monitor-controls fieldset { display: flex; flex-wrap: wrap; gap: 7px; padding: 0; border: 0; margin: 0; }
+.asio-monitor-controls label { display: grid; gap: 3px; }
+.asio-monitor-controls input { width: 78px; padding: 4px; background: #102336; border: 1px solid #345977; color: #dff5ff; border-radius: 5px; }
+.asio-monitor-controls p { color: #ffb5ba; margin: 0; }
 @media (min-width: 840px) { .timeline-grid { --track-header-width: 196px; } }
 @media (min-width: 1100px) { .timeline-grid { --track-header-width: 224px; } }
 @media (max-width: 540px) { .timeline-grid { --track-header-width: 132px; } }

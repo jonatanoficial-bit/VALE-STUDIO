@@ -10,6 +10,7 @@ use std::{
 use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager};
 mod vst_stream;
+mod asio_monitor;
 
 const VST3_HOST_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -237,9 +238,12 @@ fn probe_vst3(app: AppHandle, bundle_path: String, class_id: String) -> Result<V
 pub fn run() {
     tauri::Builder::default()
         .manage(vst_stream::Streams::default())
+        .manage(asio_monitor::Monitor::default())
         .invoke_handler(tauri::generate_handler![
             desktop_runtime, pick_vst3_directory, scan_vst3, scan_default_vst3, probe_vst3,
-            vst_stream::open_vst_stream, vst_stream::process_vst_stream, vst_stream::close_vst_stream
+            vst_stream::open_vst_stream, vst_stream::process_vst_stream, vst_stream::close_vst_stream,
+            asio_monitor::asio_monitor_available, asio_monitor::start_asio_monitor,
+            asio_monitor::stop_asio_monitor, asio_monitor::asio_monitor_running
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar Vale Studio Desktop");
