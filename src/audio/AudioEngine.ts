@@ -410,7 +410,7 @@ export class AudioEngine {
     // Retain the compressor's fixed look-ahead when bypassing its offline DSP.
     const processed = live || track.effects.compressorEnabled
       ? compressor
-      : new DelayNode(context, { delayTime: 0.006, channelCount: 2, channelCountMode: 'clamped-max' })
+      : new DelayNode(context, { delayTime: 0.006, channelCount: 2, channelCountMode: 'explicit' })
     equalized.connect(processed).connect(panner)
     if (live || track.effects.reverbEnabled) {
       reverb.buffer = createImpulse(context)
