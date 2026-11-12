@@ -70,8 +70,8 @@ export type RecoveredTakeDraft = TakeDraft & { pcm: Float32Array }
 
 async function deleteDraftChunks(transaction: IDBTransaction, draftId: string): Promise<void> {
   const store = transaction.objectStore(TAKE_CHUNK_STORE)
-  const chunks = await requestResult(store.index('byDraftId').getAll(IDBKeyRange.only(draftId))) as TakeDraftChunk[]
-  chunks.forEach((chunk) => store.delete([chunk.draftId, chunk.sequence]))
+  const keys = await requestResult(store.index('byDraftId').getAllKeys(IDBKeyRange.only(draftId)))
+  keys.forEach((key) => store.delete(key))
 }
 
 export const projectRepository = {

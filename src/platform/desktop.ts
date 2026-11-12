@@ -116,16 +116,38 @@ export async function startAsioMonitor(settings: NativeCaptureSettings & { captu
   return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)
 }
 
-export async function startWasapiDuplex(settings: WasapiCaptureSettings, dryReturn: boolean, channels: 1 | 2, backing: ArrayBuffer): Promise<AsioMonitorInfo> {
+export const MAX_WASAPI_BACKING_FRAMES = (512 * 1024 * 1024) / (2 * Float32Array.BYTES_PER_ELEMENT)
+
+export async function startWasapiDuplex(settings: WasapiCaptureSettings, dryReturn: boolean, channels: 1 | 2, backing: AudioBuffer): Promise<AsioMonitorInfo> {
   const core = nativeCore()
   if (!core || !settings.playback) throw new Error('Selecione a saída WASAPI no Vale Studio Desktop.')
   const { device, period } = settings.playback
-  return core.invoke('start_wasapi_duplex', new Uint8Array(backing), { headers: {
-    'x-input-id': settings.inputDeviceId, 'x-input-period': String(settings.frames),
-    'x-input-rate': String(settings.sampleRate), 'x-first-channel': String(settings.input), 'x-channels': String(channels),
-    'x-output-id': device.id, 'x-output-period': String(period), 'x-output-rate': String(device.sampleRate),
-    'x-dry-return': dryReturn ? '1' : '0',
-  } })
+  const id = crypto.randomUUID()
+  const blockFrames = 131072
+  const bytesPerFrame = 2 * Float32Array.BYTES_PER_ELEMENT
+  await core.invoke('begin_wasapi_backing', { id, bytes: backing.length * bytesPerFrame })
+  try {
+    const left = backing.getChannelData(0)
+    const right = backing.getChannelData(1)
+    const pcm = new Float32Array(blockFrames * 2)
+    for (let offset = 0; offset < backing.length; offset += blockFrames) {
+      const count = Math.min(blockFrames, backing.length - offset)
+      for (let frame = 0; frame < count; frame += 1) {
+        pcm[frame * 2] = left[offset + frame]
+        pcm[frame * 2 + 1] = right[offset + frame]
+      }
+      await core.invoke('append_wasapi_backing', new Uint8Array(pcm.buffer, 0, count * bytesPerFrame), { headers: {
+        'x-backing-id': id, 'x-backing-offset': String(offset * bytesPerFrame),
+      } })
+    }
+    return await core.invoke('start_wasapi_duplex', {
+      backingId: id, frames: settings.frames, sampleRate: settings.sampleRate, input: settings.input, channels,
+      inputDeviceId: settings.inputDeviceId, outputDevice: device.id, outputPeriod: period, outputRate: device.sampleRate, dryReturn,
+    })
+  } catch (error) {
+    await core.invoke('discard_wasapi_backing', { id }).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function readAsioCapture(): Promise<AsioCapturePacket> {

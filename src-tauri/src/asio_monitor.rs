@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader, Read, Write},
+    fs::File,
+    io::{BufRead, BufReader, Read, Seek, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
@@ -15,6 +16,69 @@ pub struct Monitor(Mutex<Option<Session>>);
 
 #[derive(Default)]
 pub struct WasapiOutput(Mutex<Option<Child>>);
+
+const MAX_WASAPI_BACKING_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_WASAPI_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+pub struct WasapiBacking(Mutex<Option<BackingUpload>>);
+
+struct BackingUpload {
+    id: String,
+    file: File,
+    received: u64,
+    expected: u64,
+}
+
+#[tauri::command]
+pub async fn begin_wasapi_backing(app: AppHandle, id: String, bytes: u64) -> Result<(), String> {
+    if id.len() != 36 || bytes == 0 || bytes % 8 != 0 || bytes > MAX_WASAPI_BACKING_BYTES {
+        return Err("Tamanho da base WASAPI inválido.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<WasapiBacking>();
+        let mut slot = state.0.lock().map_err(|_| "Base WASAPI indisponível.")?;
+        let file = tempfile::tempfile().map_err(|error| format!("Não foi possível criar a base temporária: {error}"))?;
+        *slot = Some(BackingUpload { id, file, received: 0, expected: bytes });
+        Ok(())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn append_wasapi_backing(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let header = |key: &str| request.headers().get(key).and_then(|value| value.to_str().ok());
+    let id = header("x-backing-id").filter(|id| id.len() == 36).ok_or("Identificador da base inválido.")?.to_owned();
+    let offset = header("x-backing-offset").and_then(|value| value.parse::<u64>().ok()).ok_or("Posição PCM inválida.")?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("PCM inválido.".into()); };
+    if bytes.is_empty() || bytes.len() % 8 != 0 || bytes.len() > MAX_WASAPI_CHUNK_BYTES {
+        return Err("Bloco PCM inválido.".into());
+    }
+    let bytes = bytes.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<WasapiBacking>();
+        let mut slot = state.0.lock().map_err(|_| "Base WASAPI indisponível.")?;
+        let upload = slot.as_mut().filter(|upload| upload.id == id).ok_or("A base WASAPI não está aberta.")?;
+        if offset != upload.received || bytes.len() as u64 > upload.expected - upload.received {
+            return Err("Bloco PCM fora da sequência.".into());
+        }
+        if let Err(error) = upload.file.write_all(&bytes) {
+            *slot = None;
+            return Err(format!("Falha ao escrever a base temporária: {error}"));
+        }
+        upload.received += bytes.len() as u64;
+        Ok(())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn discard_wasapi_backing(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<WasapiBacking>();
+    let mut slot = state.0.lock().map_err(|_| "Base WASAPI indisponível.")?;
+    if slot.as_ref().is_some_and(|upload| upload.id == id) {
+        *slot = None;
+    }
+    Ok(())
+}
 
 impl Drop for WasapiOutput {
     fn drop(&mut self) {
@@ -309,27 +373,29 @@ struct WasapiDuplex {
     output_device: String,
     output_period: u32,
     output_rate: u32,
-    backing: Vec<u8>,
+    backing: BackingUpload,
 }
 
 #[tauri::command]
-pub async fn start_wasapi_duplex(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<MonitorInfo, String> {
-    let header = |key: &str| request.headers().get(key).and_then(|value| value.to_str().ok());
-    let id = |key: &str| header(key).filter(|value| !value.is_empty() && value.len() <= 2048).map(str::to_owned);
-    let number = |key: &str| header(key).and_then(|value| value.parse::<u32>().ok()).ok_or("Configuração WASAPI inválida.");
-    let input_device = id("x-input-id").ok_or("Escolha a entrada WASAPI.")?;
-    let output_device = id("x-output-id").ok_or("Escolha a saída WASAPI.")?;
-    let output_period = number("x-output-period")?;
-    let output_rate = number("x-output-rate")?;
-    let dry_return = header("x-dry-return") == Some("1");
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("PCM inválido.".into()); };
-    if bytes.len() % 8 != 0 || bytes.len() > 192 * 1024 * 1024
+pub async fn start_wasapi_duplex(
+    app: AppHandle, backing_id: String, input_device_id: String, frames: u32, sample_rate: u32,
+    input: u32, channels: u32, output_device: String, output_period: u32, output_rate: u32, dry_return: bool,
+) -> Result<MonitorInfo, String> {
+    if output_device.is_empty() || output_device.len() > 2048
         || output_period > 32768 || !(8000..=192000).contains(&output_rate) {
-        return Err("Configuração ou PCM incompatível com a saída WASAPI.".into());
+        return Err("Configuração incompatível com a saída WASAPI.".into());
     }
-    let duplex = WasapiDuplex { output_device, output_period, output_rate, backing: bytes.clone() };
-    start_monitor(app, number("x-input-period")?, number("x-input-rate")?, number("x-first-channel")?, 0,
-        Some(true), Some(dry_return), Some(number("x-channels")?), Some("wasapi".into()), Some(input_device), Some(duplex)).await
+    let backing = {
+        let state = app.state::<WasapiBacking>();
+        let mut slot = state.0.lock().map_err(|_| "Base WASAPI indisponível.")?;
+        if !slot.as_ref().is_some_and(|upload| upload.id == backing_id && upload.received == upload.expected) {
+            return Err("A base WASAPI chegou incompleta.".into());
+        }
+        slot.take().expect("base WASAPI verificada")
+    };
+    let duplex = WasapiDuplex { output_device, output_period, output_rate, backing };
+    start_monitor(app, frames, sample_rate, input, 0, Some(true), Some(dry_return), Some(channels),
+        Some("wasapi".into()), Some(input_device_id), Some(duplex)).await
 }
 
 async fn start_monitor(
@@ -368,7 +434,7 @@ async fn start_monitor(
                 input_device_id.unwrap_or_default(), frames.to_string(), input.to_string(), channels.to_string()]);
             if let Some(output) = &duplex {
                 command.args([output.output_device.clone(), output.output_period.to_string(), output.output_rate.to_string(),
-                    if dry_return == Some(true) { "1" } else { "0" }.to_owned(), (output.backing.len() / 8).to_string()]);
+                    if dry_return == Some(true) { "1" } else { "0" }.to_owned(), (output.backing.expected / 8).to_string()]);
             }
         } else {
             command.args([
@@ -420,16 +486,19 @@ async fn start_monitor(
             let _ = error_tx.send(message.trim().to_owned());
         });
         let mut session = Session { child, diagnostics, capture, capture_done, wasapi_duplex: duplex.is_some() };
-        let sent = duplex.filter(|output| !output.backing.is_empty()).map(|output| {
+        let sent = duplex.map(|mut output| {
             let mut stdin = session.child.stdin.take().expect("stdin redirecionado");
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
-                let result = stdin.write_all(&output.backing);
+                let result = output.backing.file.rewind().and_then(|()| std::io::copy(&mut output.backing.file, &mut stdin))
+                    .and_then(|count| if count == output.backing.expected { Ok(()) } else {
+                        Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "base WASAPI incompleta"))
+                    });
                 let _ = sender.send((stdin, result));
             });
             receiver
         });
-        let info = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        let info = match ready_rx.recv_timeout(Duration::from_secs(if sent.is_some() { 30 } else { 5 })) {
             Ok(Ok(info)) if info.callbacks > 0 && info.frames > 0 && info.channels == channels && info.sample_rate.is_finite() && info.sample_rate > 0.0 => info,
             _ => return Err(session.error(if wasapi { "O WASAPI não confirmou blocos de áudio." } else { "O ASIO4ALL não confirmou blocos de áudio." })),
         };

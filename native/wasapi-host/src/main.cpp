@@ -264,7 +264,7 @@ public:
       monitorTarget(std::max(output.buffer, output.period + inputPeriod)), dryReturn(dry) {
     if (dry && inputRate != stream.format->nSamplesPerSec)
       throw std::runtime_error("O retorno WASAPI exige a mesma taxa de amostragem na entrada e na saída");
-    if (frames > (192u * 1024 * 1024) / (2 * sizeof(float)))
+    if (frames > (512u * 1024 * 1024) / (2 * sizeof(float)))
       throw std::runtime_error("A base WASAPI excede o limite de duração");
     if (dry) monitor.resize(monitorTarget * 8);
     backing.resize(frames * 2);
