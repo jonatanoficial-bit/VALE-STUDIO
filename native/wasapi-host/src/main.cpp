@@ -20,6 +20,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -222,9 +223,10 @@ class CaptureRing {
   std::array<float, capacity> data {};
   std::atomic<uint32_t> head {0}, tail {0};
 public:
-  bool append(const BYTE* input, UINT32 frames, const WAVEFORMATEX& format, Sample sample, UINT32 first, UINT32 channels) {
+  bool append(const BYTE* input, UINT32 frames, const WAVEFORMATEX& format, Sample sample, UINT32 first, UINT32 channels, UINT32 missing) {
     auto at = head.load(std::memory_order_relaxed);
-    if (frames > (capacity - (at - tail.load(std::memory_order_acquire))) / channels) return false;
+    if (static_cast<uint64_t>(frames) + missing > (capacity - (at - tail.load(std::memory_order_acquire))) / channels) return false;
+    for (UINT32 index = 0; index < missing * channels; ++index) data[at++ % capacity] = 0.f;
     const UINT32 bytes = format.wBitsPerSample / 8;
     for (UINT32 frame = 0; frame < frames; ++frame) {
       for (UINT32 channel = 0; channel < channels; ++channel)
@@ -329,13 +331,24 @@ public:
     check(render->ReleaseBuffer(frames, 0), "Entregar saída durante a gravação");
   }
 
-  void report() const {
-    std::cerr << "VALE_WASAPI_STATS {\"renderedBackingFrames\":" << cursor / 2
+  void reportFields(std::ostream& report) const {
+    report << ",\"renderedBackingFrames\":" << cursor / 2
               << ",\"emptyOutputBuffers\":" << emptyBuffers << ",\"monitorDroppedFrames\":" << monitorDrops
               << ",\"monitorUnderruns\":" << monitorUnderruns
-              << ",\"monitorPrimingFrames\":" << (dryReturn ? monitorTarget : 0) << "}\n";
+              << ",\"monitorPrimingFrames\":" << (dryReturn ? monitorTarget : 0);
   }
 };
+
+constexpr std::optional<UINT32> captureGap(std::optional<UINT64> expected, std::optional<UINT64> position, UINT32 limit) {
+  if (!expected || !position || *position < *expected || *position - *expected > limit) return std::nullopt;
+  return static_cast<UINT32>(*position - *expected);
+}
+
+static_assert(captureGap(1000, 1000, 480) == 0);
+static_assert(captureGap(1000, 1480, 480) == 480);
+static_assert(!captureGap(1000, 1481, 480));
+static_assert(!captureGap(1000, 999, 480));
+static_assert(!captureGap(1000, std::nullopt, 480));
 
 void capture(Stream& stream, UINT32 first, UINT32 channels, Stream* outputStream = nullptr, bool dryReturn = false, size_t backingFrames = 0) {
   const auto& format = *stream.format;
@@ -382,6 +395,9 @@ void capture(Stream& stream, UINT32 first, UINT32 channels, Stream* outputStream
   const Mmcss priority;
   const HANDLE events[] = {stop.handle, stream.event.handle, outputStream ? outputStream->event.handle : nullptr};
   auto lastCapture = std::chrono::steady_clock::now();
+  std::optional<UINT64> expectedPosition;
+  UINT64 missingFrames = 0;
+  UINT32 discontinuities = 0;
   while (true) {
     const DWORD event = WaitForMultipleObjects(outputStream && outputStream->started ? 3 : 2, events, FALSE, 2000);
     if (event == WAIT_OBJECT_0) break;
@@ -398,14 +414,30 @@ void capture(Stream& stream, UINT32 first, UINT32 channels, Stream* outputStream
       BYTE* data;
       UINT32 frames;
       DWORD flags;
-      check(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr), "Ler captura");
-      const bool interrupted = received.load() && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY);
+      UINT64 position;
+      const HRESULT result = capture->GetBuffer(&data, &frames, &flags, &position, nullptr);
+      check(result, "Ler captura");
+      if (result == AUDCLNT_S_BUFFER_EMPTY) break;
+      const bool validPosition = !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR);
+      const bool discontinuity = received.load() && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY);
+      const auto missing = discontinuity
+        ? captureGap(expectedPosition, validPosition ? std::optional<UINT64>(position) : std::nullopt, format.nSamplesPerSec / 10)
+        : std::optional<UINT32>(0);
       const auto* pcm = (flags & AUDCLNT_BUFFERFLAGS_SILENT) ? nullptr : data;
-      const bool retained = !interrupted && ring->append(pcm, frames, format, sample, first, channels);
-      if (retained && output) output->push(pcm, frames, format, sample, first, channels);
+      const bool retained = missing && ring->append(pcm, frames, format, sample, first, channels, *missing);
+      if (retained && output) {
+        output->push(nullptr, *missing, format, sample, first, channels);
+        output->push(pcm, frames, format, sample, first, channels);
+      }
       check(capture->ReleaseBuffer(frames), "Liberar captura");
-      if (interrupted) throw std::runtime_error("Descontinuidade no dispositivo de captura WASAPI");
+      if (!missing) throw std::runtime_error("Descontinuidade WASAPI sem posição de captura recuperável");
       if (!retained) throw std::runtime_error("A fila PCM atingiu o limite");
+      if (validPosition) expectedPosition = position + frames;
+      else if (expectedPosition) *expectedPosition += frames;
+      if (discontinuity) {
+        ++discontinuities;
+        missingFrames += *missing;
+      }
       lastCapture = std::chrono::steady_clock::now();
       if (outputStream && !outputStream->started) {
         output->fill();
@@ -416,8 +448,11 @@ void capture(Stream& stream, UINT32 first, UINT32 channels, Stream* outputStream
       check(capture->GetNextPacketSize(&queued), "Consultar captura");
     }
   }
-  if (output) output->report();
   if (failed.load()) throw std::runtime_error("O pipe de captura foi interrompido");
+  std::cerr << "VALE_WASAPI_STATS {\"captureDiscontinuities\":" << discontinuities
+            << ",\"captureMissingFrames\":" << missingFrames;
+  if (output) output->reportFields(std::cerr);
+  std::cerr << "}\n";
 }
 
 void verifyOutput(Stream& stream, unsigned seconds) {

@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, memo, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
 import type { NativeCaptureSettings, WasapiCaptureStats } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
@@ -84,7 +84,7 @@ function mergeVst3Plugins(current: Vst3Plugin[], incoming: Vst3Plugin[]): Vst3Pl
   return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
 }
 
-function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
+const Waveform = memo(function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
   const samples = peaks.length < 2 ? [peaks[0] ?? 0, peaks[0] ?? 0] : peaks
   const edge = (direction: number) => samples.map((peak, index) => {
     const x = index / (samples.length - 1) * 100
@@ -95,7 +95,7 @@ function Waveform({ peaks, color }: { peaks: number[]; color: string }) {
       <polygon points={[...edge(-1), ...edge(1).reverse()].join(' ')} fill={color} />
     </svg>
   )
-}
+})
 
 function MidiRoll({ notes, color, framesPerBeat, timelineFrames, pencil, onDraw }: {
   notes: MidiNote[]; color: string; framesPerBeat: number; timelineFrames: number; pencil: boolean;
@@ -113,9 +113,9 @@ function MidiRoll({ notes, color, framesPerBeat, timelineFrames, pencil, onDraw 
   </div>
 }
 
-function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, tool, selected, editable, onSelect, onEdit }: {
+const TimelineClip = memo(function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, tool, selected, editable, onSelect, onEdit }: {
   clip: Clip; asset?: MediaAsset; color: string; timelineFrames: number; snapFrames?: number; tool: 'move' | 'trim'; selected: boolean; editable: boolean
-  onSelect: () => void; onEdit: (clip: Clip) => void
+  onSelect: (clip: Clip) => void; onEdit: (clip: Clip) => void
 }) {
   const gesture = useRef<{ id: number; x: number; width: number; moved: boolean; mode: 'move' | 'start' | 'end' } | null>(null)
   const [draft, setDraft] = useState<Clip>()
@@ -152,7 +152,7 @@ function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, tool, se
   return <button type="button" className={`audio-clip ${selected ? 'selected' : ''} ${draft ? 'clip-moving' : ''} ${tool === 'trim' ? 'clip-trim' : ''}`}
     style={{ left: `${visible.timelineStartFrame / timelineFrames * 100}%`, width: `${visible.durationFrames / timelineFrames * 100}%`, '--clip-color': color } as React.CSSProperties}
     aria-label={`Selecionar clipe ${asset?.name ?? 'gravado'}`}
-    onClick={(event) => { event.stopPropagation(); onSelect() }}
+    onClick={(event) => { event.stopPropagation(); onSelect(clip) }}
     onPointerDown={(event) => {
       if (!editable || !event.isPrimary || event.button !== 0) return
       const width = event.currentTarget.parentElement?.getBoundingClientRect().width ?? 0
@@ -173,13 +173,13 @@ function TimelineClip({ clip, asset, color, timelineFrames, snapFrames, tool, se
       if (!start || start.id !== event.pointerId) return
       gesture.current = null
       setDraft(undefined)
-      if (editable && start.moved) { onSelect(); onEdit(targetClip(event.clientX, start)) }
+      if (editable && start.moved) { onSelect(clip); onEdit(targetClip(event.clientX, start)) }
     }}
     onLostPointerCapture={() => { gesture.current = null; setDraft(undefined) }}>
     <Waveform peaks={peaks} color={color} />
     <small>{asset?.name.replace(/\.[^.]+$/, '')}</small>
   </button>
-}
+})
 
 function TrackSends({ track, onChange }: { track: Track; onChange: (bus: 'reverb' | 'delay', level: number) => void }) {
   return <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
@@ -316,6 +316,19 @@ export default function App() {
   }, [project])
   const selectedClip = project?.clips.find((clip) => clip.id === selectedClipId)
   const activeAssetById = useMemo(() => new Map(project?.assets.map((asset) => [asset.id, asset]) ?? []), [project])
+  const visibleClipsByTrack = useMemo(() => {
+    const groups = new Map<string, Clip[]>()
+    if (!project) return groups
+    const tracks = new Map(project.tracks.map((track) => [track.id, track]))
+    for (const clip of project.clips) {
+      const track = tracks.get(clip.trackId)
+      if (!track || (track.compEnabled ? !clipIsAudible(project, clip) : clip.compSegment)) continue
+      const clips = groups.get(track.id)
+      if (clips) clips.push(clip)
+      else groups.set(track.id, [clip])
+    }
+    return groups
+  }, [project])
   const activeProjectId = project?.id
   const desktopRuntime = isDesktopRuntime()
   const finishPunch = useEffectEvent(() => { void toggleRecording() })
@@ -412,7 +425,7 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [project, isRecording, isPlaying, view])
 
-  function updateProject(change: (current: AudioProject) => AudioProject, recordHistory = true) {
+  const updateProject = useCallback((change: (current: AudioProject) => AudioProject, recordHistory = true) => {
     setProject((current) => {
       if (!current) return current
       if (recordHistory) {
@@ -422,7 +435,17 @@ export default function App() {
       const next = { ...change(current), updatedAt: new Date().toISOString() }
       return next
     })
-  }
+  }, [])
+
+  const selectTimelineClip = useCallback((clip: Clip) => {
+    if (isRecording) return
+    setSelectedTrackId(clip.trackId)
+    setSelectedClipId(clip.id)
+  }, [isRecording])
+
+  const editTimelineClip = useCallback((updated: Clip) => {
+    updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === updated.id ? updated : clip) }))
+  }, [updateProject])
 
   function updateTrack(id: string, change: (track: Track) => Track) {
     updateProject((current) => ({ ...current, tracks: current.tracks.map((track) => track.id === id ? change(track) : track) }))
@@ -1022,8 +1045,11 @@ export default function App() {
         setTakeDrafts((drafts) => drafts.filter((draft) => !entries.some((entry) => entry.draftId === draft.id)))
         void projectRepository.listProjects().then(setProjects)
         const durabilityNotice = captured.durability.error ? ' O take foi confirmado no commit final, mas houve falha em um checkpoint intermediário.' : ''
+        const gapNotice = captured.wasapi?.captureMissingFrames
+          ? ` O WASAPI preencheu ${captured.wasapi.captureMissingFrames.toLocaleString('pt-BR')} frames ausentes com silêncio.`
+          : ''
         setToast(interrupted ? { tone: 'error', text: `${interrupted} O áudio disponível foi salvo em takes alternativos.` } :
-          { tone: 'success', text: `${loop ? `${entries.length} takes do loop salvos` : compPunch ? 'Punch salvo no comp' : entries.length === 1 ? 'Take salvo' : 'Dois takes sincronizados salvos'} após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.${durabilityNotice}` })
+          { tone: 'success', text: `${loop ? `${entries.length} takes do loop salvos` : compPunch ? 'Punch salvo no comp' : entries.length === 1 ? 'Take salvo' : 'Dois takes sincronizados salvos'} após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.${durabilityNotice}${gapNotice}` })
       } catch (error) {
         setToast({ tone: 'error', text: `O commit final falhou; o rascunho persistido continua disponível para recuperação.${error instanceof Error ? ` ${error.message}` : ''}` })
       }
@@ -1588,10 +1614,9 @@ export default function App() {
           {isRecording && playhead >= recordFrom && recordingPeaks[track.id] && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
             <Waveform peaks={recordingPeaks[track.id]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
-          {project.clips.filter((clip) => clip.trackId === track.id && (track.compEnabled ? clipIsAudible(project, clip) : !clip.compSegment)).map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
+          {visibleClipsByTrack.get(track.id)?.map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
             color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil'}
-            onSelect={() => { if (!isRecording) { setSelectedTrackId(track.id); setSelectedClipId(clip.id) } }}
-            onEdit={(updated) => updateProject((current) => ({ ...current, clips: current.clips.map((item) => item.id === clip.id ? updated : item) }))} />)}
+            onSelect={selectTimelineClip} onEdit={editTimelineClip} />)}
         </div>
       </article>)}
       <div className="playhead-overlay" aria-hidden="true"><i className="lane-playhead" style={{ left: playheadPosition }} /></div>

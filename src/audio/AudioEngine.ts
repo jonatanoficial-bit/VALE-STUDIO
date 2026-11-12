@@ -387,7 +387,6 @@ export class AudioEngine {
     compressor.attack.value = 0.006
     compressor.release.value = 0.16
 
-    const dry = context.createGain()
     const reverb = context.createConvolver()
     const reverbGain = context.createGain()
     reverbGain.gain.value = track.effects.reverbEnabled ? track.effects.reverbMix : 0
@@ -405,19 +404,27 @@ export class AudioEngine {
     const shouldMute = track.mute || (soloActive && !track.solo)
     fader.gain.value = shouldMute ? 0 : dbToGain(track.gainDb)
 
-    highPass.connect(eq.low).connect(eq.mid).connect(eq.high).connect(compressor)
-    compressor.connect(dry).connect(panner)
+    const equalized = live || track.effects.eq?.enabled
+      ? highPass.connect(eq.low).connect(eq.mid).connect(eq.high)
+      : highPass
+    // Retain the compressor's fixed look-ahead when bypassing its offline DSP.
+    const processed = live || track.effects.compressorEnabled
+      ? compressor
+      : new DelayNode(context, { delayTime: 0.006, channelCount: 2, channelCountMode: 'clamped-max' })
+    equalized.connect(processed).connect(panner)
     if (live || track.effects.reverbEnabled) {
       reverb.buffer = createImpulse(context)
-      compressor.connect(reverb).connect(reverbGain).connect(panner)
+      processed.connect(reverb).connect(reverbGain).connect(panner)
     }
     if (live || track.effects.delayEnabled) {
-      compressor.connect(delay).connect(delayGain).connect(panner)
+      processed.connect(delay).connect(delayGain).connect(panner)
       delay.connect(delayFeedback).connect(delay)
     }
     const analyser = context.createAnalyser()
     analyser.fftSize = 512
-    panner.connect(fader).connect(analyser).connect(destination)
+    panner.connect(fader)
+    if (live) fader.connect(analyser).connect(destination)
+    else fader.connect(destination)
     const sends = { reverb: context.createGain(), delay: context.createGain() }
     for (const bus of ['reverb', 'delay'] as const) {
       sends[bus].gain.value = sendLevel(track.sends?.[bus])
@@ -1084,7 +1091,7 @@ export class AudioEngine {
       try {
         const tail = await finishAsioCapture()
         this.acceptRecordingPcm(Float32Array.from(tail.samples))
-        capture.error ??= tail.error ?? undefined
+        capture.error = tail.error ?? capture.error
         wasapi = tail.wasapi
       } catch (error) {
         capture.error ??= String(error)
@@ -1176,11 +1183,14 @@ export class AudioEngine {
     const sourceBuffer = this.assetBuffers.get(clip.assetId)
     if (!sourceBuffer) return
     const source = offline.createBufferSource()
-    const clipGain = offline.createGain()
     source.buffer = sourceBuffer
-    source.connect(clipGain).connect(input)
     const sourceAt = clip.timelineStartFrame / project.audioSampleRate
-    this.applyClipEnvelope(clipGain, clip, sourceAt, 0, clip.durationFrames, project.audioSampleRate)
+    if (clip.gainDb === 0 && !clip.fadeInFrames && !clip.fadeOutFrames) source.connect(input)
+    else {
+      const clipGain = offline.createGain()
+      source.connect(clipGain).connect(input)
+      this.applyClipEnvelope(clipGain, clip, sourceAt, 0, clip.durationFrames, project.audioSampleRate)
+    }
     source.start(sourceAt, clip.sourceOffsetFrame / project.audioSampleRate, clip.durationFrames / project.audioSampleRate)
   }
 

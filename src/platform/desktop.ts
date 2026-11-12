@@ -101,11 +101,13 @@ export async function stopWasapiOutput(): Promise<void> {
   await nativeCore()?.invoke('stop_wasapi_output')
 }
 export type WasapiCaptureStats = {
-  renderedBackingFrames: number
-  emptyOutputBuffers: number
-  monitorDroppedFrames: number
-  monitorUnderruns: number
-  monitorPrimingFrames: number
+  captureDiscontinuities: number
+  captureMissingFrames: number
+  renderedBackingFrames?: number
+  emptyOutputBuffers?: number
+  monitorDroppedFrames?: number
+  monitorUnderruns?: number
+  monitorPrimingFrames?: number
 }
 
 export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string; wasapi?: WasapiCaptureStats }
@@ -123,8 +125,8 @@ export async function startWasapiDuplex(settings: WasapiCaptureSettings, dryRetu
   if (!core || !settings.playback) throw new Error('Selecione a saída WASAPI no Vale Studio Desktop.')
   const { device, period } = settings.playback
   const id = crypto.randomUUID()
-  const blockFrames = 131072
   const bytesPerFrame = 2 * Float32Array.BYTES_PER_ELEMENT
+  const blockFrames = (1024 * 1024) / bytesPerFrame
   await core.invoke('begin_wasapi_backing', { id, bytes: backing.length * bytesPerFrame })
   try {
     const left = backing.getChannelData(0)

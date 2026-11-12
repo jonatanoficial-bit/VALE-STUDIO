@@ -173,8 +173,12 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
     {status && <output aria-live="polite">{status}</output>}
     {busy === 'record' && <output aria-live="polite">Preparando a gravação WASAPI…</output>}
     {stats && <output aria-live="polite">
-      Última gravação · Saída vazia {stats.emptyOutputBuffers}
-      {stats.monitorPrimingFrames > 0 && ` · Fila do retorno vazia ${stats.monitorUnderruns} vezes · ${stats.monitorDroppedFrames} frames descartados · Pré-buffer ${stats.monitorPrimingFrames} frames`}
+      Última gravação
+      {stats.emptyOutputBuffers !== undefined && ` · Saída vazia ${stats.emptyOutputBuffers}`}
+      {stats.monitorPrimingFrames && stats.monitorPrimingFrames > 0
+        ? ` · Fila do retorno vazia ${stats.monitorUnderruns} vezes · ${stats.monitorDroppedFrames} frames descartados · Pré-buffer ${stats.monitorPrimingFrames} frames`
+        : ''}
+      {` · Descontinuidades de entrada ${stats.captureDiscontinuities} · ${stats.captureMissingFrames} frames preenchidos com silêncio`}
     </output>}
   </details>
 }
