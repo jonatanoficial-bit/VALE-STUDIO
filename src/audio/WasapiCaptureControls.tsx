@@ -13,7 +13,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
   blocked: boolean
   channels: 1 | 2
   otherTrack?: string
-  onRecord: (settings: WasapiCaptureSettings, twoTracks?: boolean) => Promise<void>
+  onRecord: (settings: WasapiCaptureSettings, twoTracks: boolean, dryReturn: boolean) => Promise<void>
   prepareMix: () => Promise<AudioBuffer>
   setAudioBusy: (busy: boolean) => void
 }) {
@@ -23,11 +23,13 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
   const [input, setInput] = useState(0)
   const [outputId, setOutputId] = useState('')
   const [outputFrames, setOutputFrames] = useState(0)
+  const [monitor, setMonitor] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
   const device = devices.find((item) => item.id === deviceId)
   const output = devices.find((item) => item.id === outputId)
+  const canMonitor = Boolean(output && device && output.sampleRate === device.sampleRate)
   const run = useRef<AbortController | undefined>(undefined)
 
   useEffect(() => () => {
@@ -103,6 +105,21 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
     }
   }
 
+  async function record(twoTracks: boolean) {
+    if (!device) return
+    setBusy(true)
+    try {
+      await onRecord({
+        backend: 'wasapi', frames, sampleRate: device.sampleRate,
+        input: twoTracks || input <= device.channels - channels ? input : 0,
+        output: 0, inputDeviceId: device.id,
+        playback: output ? { device: output, period: outputFrames } : undefined,
+      }, twoTracks, canMonitor && monitor)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return <details className="asio-monitor-controls">
     <summary>Áudio nativo · WASAPI Shared</summary>
     <fieldset disabled={blocked || busy}>
@@ -124,14 +141,14 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
             <option key={index} value={index}>{channels === 2 ? `${index + 1} + ${index + 2}` : index + 1}</option>)}
         </select></label>
         <button type="button" className="button record-action" disabled={!armed || device.channels < channels}
-          onClick={() => void onRecord({ backend: 'wasapi', frames, sampleRate: device.sampleRate, input: input <= device.channels - channels ? input : 0, output: 0, inputDeviceId: device.id })}>Gravar via WASAPI</button>
+          onClick={() => void record(false)}>{output ? 'Gravar com a base via WASAPI' : 'Gravar via WASAPI'}</button>
         {otherTrack && <button type="button" className="button secondary" disabled={!armed || input + 2 > device.channels}
           title={`Canal ${input + 1} na pista selecionada e canal ${input + 2} em ${otherTrack}`}
-          onClick={() => void onRecord({ backend: 'wasapi', frames, sampleRate: device.sampleRate, input, output: 0, inputDeviceId: device.id }, true)}>Gravar duas pistas mono</button>}
+          onClick={() => void record(true)}>Gravar duas pistas mono</button>}
         <output>{device.sampleRate.toLocaleString('pt-BR')} Hz · {device.channels} canais disponíveis</output>
       </>}
       {devices.some((item) => item.flow === 'output') && <label>Saída WASAPI <select value={outputId} onChange={(event) => {
-        setOutputId(event.target.value); setOutputFrames(0)
+        setOutputId(event.target.value); setOutputFrames(0); setMonitor(false)
       }}>
         <option value="">Escolha a saída</option>
         {devices.filter((item) => item.flow === 'output').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -141,6 +158,9 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
           <option value={0}>Automático · {output.standard} frames</option>
           {supportedPeriods(output).map((period) => <option key={period} value={period}>{period} frames</option>)}
         </select></label>
+        <label><input type="checkbox" checked={canMonitor && monitor} disabled={!canMonitor}
+          onChange={(event) => setMonitor(event.target.checked)} /> Ouvir a entrada durante a gravação</label>
+        {device && !canMonitor && <output>O retorno requer entrada e saída na mesma taxa.</output>}
         <button className="button secondary" type="button" onClick={() => void playMix(output)}>Reproduzir mixagem via WASAPI</button>
       </>}
     </fieldset>

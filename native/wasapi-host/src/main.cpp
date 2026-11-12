@@ -247,7 +247,95 @@ public:
   }
 };
 
-void capture(Stream& stream, UINT32 first, UINT32 channels) {
+class RecordingOutput {
+  Stream& stream;
+  ComPtr<IAudioRenderClient> render;
+  Sample type;
+  std::vector<float> backing, monitor;
+  size_t cursor = 0, head = 0, count = 0;
+  size_t monitorTarget;
+  UINT32 emptyBuffers = 0, monitorDrops = 0, monitorUnderruns = 0;
+  bool dryReturn, monitoring = false;
+public:
+  UINT32 latencyFrames;
+
+  RecordingOutput(Stream& output, UINT32 inputRate, UINT32 inputPeriod, bool dry, size_t frames)
+    : stream(output), type(sampleType(*output.format)), monitorTarget(std::max(output.period, inputPeriod)), dryReturn(dry) {
+    if (dry && inputRate != stream.format->nSamplesPerSec)
+      throw std::runtime_error("O retorno WASAPI exige a mesma taxa de amostragem na entrada e na saída");
+    if (frames > (192u * 1024 * 1024) / (2 * sizeof(float)))
+      throw std::runtime_error("A base WASAPI excede o limite de duração");
+    if (dry) monitor.resize(static_cast<size_t>(monitorTarget) * 8);
+    backing.resize(frames * 2);
+    if (frames && (_setmode(_fileno(stdin), _O_BINARY) < 0 ||
+        std::fread(backing.data(), sizeof(float), backing.size(), stdin) != backing.size()))
+      throw std::runtime_error("A base WASAPI chegou incompleta");
+    check(stream.client->GetService(IID_PPV_ARGS(&render)), "IAudioRenderClient");
+    REFERENCE_TIME latency = 0;
+    check(stream.client->GetStreamLatency(&latency), "Consultar latência da saída WASAPI");
+    latencyFrames = static_cast<UINT32>(std::max<REFERENCE_TIME>(0, latency) * stream.format->nSamplesPerSec / 10000000);
+  }
+
+  void push(const BYTE* data, UINT32 frames, const WAVEFORMATEX& format, Sample sample, UINT32 first, UINT32 channels) {
+    if (!dryReturn) return;
+    const auto bytes = format.wBitsPerSample / 8;
+    const auto capacity = monitor.size() / 2;
+    for (UINT32 frame = 0; frame < frames; ++frame) {
+      if (count == capacity) {
+        head = (head + 1) % capacity;
+        --count;
+        ++monitorDrops;
+      }
+      const auto index = ((head + count) % capacity) * 2;
+      const auto* source = data ? data + frame * format.nBlockAlign + first * bytes : nullptr;
+      monitor[index] = source ? decode(source, sample) : 0.f;
+      monitor[index + 1] = channels == 2 && source ? decode(source + bytes, sample) : monitor[index];
+      ++count;
+    }
+  }
+
+  void fill() {
+    UINT32 padding;
+    check(stream.client->GetCurrentPadding(&padding), "Consultar saída durante a gravação");
+    if (stream.started && !padding) ++emptyBuffers;
+    const UINT32 frames = stream.buffer - padding;
+    if (!frames) return;
+    BYTE* data;
+    check(render->GetBuffer(frames, &data), "Abrir saída durante a gravação");
+    const auto& format = *stream.format;
+    const auto bytes = format.wBitsPerSample / 8;
+    std::memset(data, 0, static_cast<size_t>(frames) * format.nBlockAlign);
+    if (dryReturn && count >= monitorTarget) monitoring = true;
+    for (UINT32 frame = 0; frame < frames; ++frame) {
+      float left = 0.f, right = 0.f;
+      if (cursor < backing.size()) {
+        left = backing[cursor++];
+        right = backing[cursor++];
+      }
+      if (monitoring && count) {
+        left += monitor[head * 2] * 0.5f;
+        right += monitor[head * 2 + 1] * 0.5f;
+        head = (head + 1) % (monitor.size() / 2);
+        --count;
+      } else if (monitoring) {
+        monitoring = false;
+        ++monitorUnderruns;
+      }
+      auto* target = data + frame * format.nBlockAlign;
+      encode(target, type, format.nChannels == 1 ? (left + right) * 0.5f : left);
+      if (format.nChannels > 1) encode(target + bytes, type, right);
+    }
+    check(render->ReleaseBuffer(frames, 0), "Entregar saída durante a gravação");
+  }
+
+  void report() const {
+    std::cerr << "VALE_WASAPI_STATS {\"renderedBackingFrames\":" << cursor / 2
+              << ",\"emptyOutputBuffers\":" << emptyBuffers << ",\"monitorDroppedFrames\":" << monitorDrops
+              << ",\"monitorUnderruns\":" << monitorUnderruns << "}\n";
+  }
+};
+
+void capture(Stream& stream, UINT32 first, UINT32 channels, Stream* outputStream = nullptr, bool dryReturn = false, size_t backingFrames = 0) {
   const auto& format = *stream.format;
   if (channels < 1 || channels > 2 || first >= format.nChannels || channels > format.nChannels - first)
     throw std::runtime_error("O dispositivo não oferece os canais de captura solicitados");
@@ -259,6 +347,8 @@ void capture(Stream& stream, UINT32 first, UINT32 channels) {
   check(stream.client->GetService(IID_PPV_ARGS(&capture)), "IAudioCaptureClient");
   if (GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_PIPE)
     throw std::runtime_error("A captura requer o pipe de controle do aplicativo");
+  std::unique_ptr<RecordingOutput> output;
+  if (outputStream) output = std::make_unique<RecordingOutput>(*outputStream, format.nSamplesPerSec, stream.period, dryReturn, backingFrames);
   if (_setmode(_fileno(stdout), _O_BINARY) < 0) throw std::runtime_error("Pipe PCM indisponível");
   Event stop, flush;
   auto ring = std::make_unique<CaptureRing>();
@@ -277,8 +367,8 @@ void capture(Stream& stream, UINT32 first, UINT32 channels) {
     while (true) {
       WaitForSingleObject(flush.handle, 30);
       if (!announced && received.load()) {
-        std::fprintf(stdout, "VALE_ASIO_READY {\"frames\":%u,\"bufferFrames\":%u,\"channels\":%u,\"sampleRate\":%lu,\"inputLatency\":%u,\"outputLatency\":0,\"callbacks\":1}\n",
-          stream.period, stream.buffer, channels, format.nSamplesPerSec, latencyFrames);
+        std::fprintf(stdout, "VALE_ASIO_READY {\"frames\":%u,\"bufferFrames\":%u,\"channels\":%u,\"sampleRate\":%lu,\"inputLatency\":%u,\"outputLatency\":%u,\"callbacks\":1}\n",
+          stream.period, stream.buffer, channels, format.nSamplesPerSec, latencyFrames, output ? output->latencyFrames : 0);
         announced = true;
       }
       if (announced && !ring->drain()) { failed.store(true); SetEvent(stop.handle); return; }
@@ -288,10 +378,17 @@ void capture(Stream& stream, UINT32 first, UINT32 channels) {
 
   stream.start();
   const Mmcss priority;
-  const HANDLE events[] = {stop.handle, stream.event.handle};
+  const HANDLE events[] = {stop.handle, stream.event.handle, outputStream ? outputStream->event.handle : nullptr};
+  auto lastCapture = std::chrono::steady_clock::now();
   while (true) {
-    const DWORD event = WaitForMultipleObjects(2, events, FALSE, 2000);
+    const DWORD event = WaitForMultipleObjects(outputStream && outputStream->started ? 3 : 2, events, FALSE, 2000);
     if (event == WAIT_OBJECT_0) break;
+    if (event == WAIT_OBJECT_0 + 2) {
+      if (std::chrono::steady_clock::now() - lastCapture >= 2s)
+        throw std::runtime_error("WASAPI parou de entregar blocos de entrada");
+      output->fill();
+      continue;
+    }
     if (event != WAIT_OBJECT_0 + 1) throw std::runtime_error("WASAPI parou de entregar blocos de entrada");
     UINT32 queued;
     check(capture->GetNextPacketSize(&queued), "Consultar captura");
@@ -301,15 +398,23 @@ void capture(Stream& stream, UINT32 first, UINT32 channels) {
       DWORD flags;
       check(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr), "Ler captura");
       const bool interrupted = received.load() && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY);
-      const bool retained = !interrupted && ring->append((flags & AUDCLNT_BUFFERFLAGS_SILENT) ? nullptr : data, frames, format, sample, first, channels);
+      const auto* pcm = (flags & AUDCLNT_BUFFERFLAGS_SILENT) ? nullptr : data;
+      const bool retained = !interrupted && ring->append(pcm, frames, format, sample, first, channels);
+      if (retained && output) output->push(pcm, frames, format, sample, first, channels);
       check(capture->ReleaseBuffer(frames), "Liberar captura");
       if (interrupted) throw std::runtime_error("Descontinuidade no dispositivo de captura WASAPI");
       if (!retained) throw std::runtime_error("A fila PCM atingiu o limite");
+      lastCapture = std::chrono::steady_clock::now();
+      if (outputStream && !outputStream->started) {
+        output->fill();
+        outputStream->start();
+      }
       received.store(true);
       SetEvent(flush.handle);
       check(capture->GetNextPacketSize(&queued), "Consultar captura");
     }
   }
+  if (output) output->report();
   if (failed.load()) throw std::runtime_error("O pipe de captura foi interrompido");
 }
 
@@ -403,6 +508,12 @@ int wmain(int argc, wchar_t** argv) {
     else if (operation == L"--capture" && argc == 6) {
       Stream stream(devices.Get(), eCapture, argv[2], std::stoul(argv[3]));
       capture(stream, std::stoul(argv[4]), std::stoul(argv[5]));
+    } else if (operation == L"--duplex" && argc == 11) {
+      Stream input(devices.Get(), eCapture, argv[2], std::stoul(argv[3]));
+      Stream output(devices.Get(), eRender, argv[6], std::stoul(argv[7]));
+      if (output.format->nSamplesPerSec != std::stoul(argv[8]))
+        throw std::runtime_error("A taxa da saída WASAPI mudou. Atualize a lista de dispositivos.");
+      capture(input, std::stoul(argv[4]), std::stoul(argv[5]), &output, std::wstring(argv[9]) == L"1", std::stoul(argv[10]));
     } else if (operation == L"--verify-output" && argc == 5) {
       Stream stream(devices.Get(), eRender, argv[2], std::stoul(argv[3]));
       verifyOutput(stream, std::stoul(argv[4]));

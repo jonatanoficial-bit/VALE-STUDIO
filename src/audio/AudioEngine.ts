@@ -4,7 +4,7 @@ import { clipIsAudible } from '../domain/comp'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
-import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, type NativeCaptureSettings } from '../platform/desktop'
+import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
 type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; showEditor: () => void }
@@ -995,9 +995,11 @@ export class AudioEngine {
   }
 
   async startAsioRecording(trackId: string, projectRate: number, settings: NativeCaptureSettings, dryReturn: boolean, channels: 1 | 2,
-    onPcmChunk: (chunk: RecordingPcmChunk) => Promise<void>, onFailure: (reason: string) => void): Promise<RecordingStart> {
-    if (!this.context || this.playing || this.recordingTrackId) throw new Error('Pare o transporte antes de gravar pelo ASIO.')
-    const info = await startAsioMonitor({ ...settings, capture: true, dryReturn, channels })
+    onPcmChunk: (chunk: RecordingPcmChunk) => Promise<void>, onFailure: (reason: string) => void, backing?: ArrayBuffer): Promise<RecordingStart> {
+    if (!this.context || this.playing || this.recordingTrackId) throw new Error('Pare o transporte antes de iniciar a gravação nativa.')
+    const info = settings.backend === 'wasapi' && backing
+      ? await startWasapiDuplex(settings, dryReturn, channels, backing)
+      : await startAsioMonitor({ ...settings, capture: true, dryReturn, channels })
     if (info.sampleRate !== settings.sampleRate || info.channels !== channels) {
       await finishAsioCapture()
       throw new Error('O driver abriu com uma taxa ou quantidade de canais diferente da solicitada.')
@@ -1262,6 +1264,29 @@ export class AudioEngine {
       source.start(0, from)
     }
     return context.startRendering()
+  }
+
+  async renderWasapiBacking(project: AudioProject, start: number, rate: number): Promise<ArrayBuffer> {
+    const from = start / project.audioSampleRate
+    const remaining = this.renderLength(project) / project.audioSampleRate - from
+    const frames = Math.max(1, Math.ceil(remaining * rate))
+    if (frames > 192 * 1024 * 1024 / 8) throw new Error('A base excede a duração suportada pela gravação WASAPI.')
+    if (remaining <= 0) return new Float32Array(2).buffer
+    const mix = await this.renderMix(project)
+    const context = new OfflineAudioContext(2, frames, rate)
+    const source = context.createBufferSource()
+    source.buffer = mix
+    source.connect(context.destination)
+    source.start(0, from)
+    const rendered = await context.startRendering()
+    const left = rendered.getChannelData(0)
+    const right = rendered.getChannelData(1)
+    const pcm = new Float32Array(frames * 2)
+    for (let frame = 0; frame < frames; frame += 1) {
+      pcm[frame * 2] = left[frame]
+      pcm[frame * 2 + 1] = right[frame]
+    }
+    return pcm.buffer
   }
 
   async renderStem(project: AudioProject, trackId: string): Promise<AudioBuffer> {

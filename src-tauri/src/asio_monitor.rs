@@ -289,6 +289,41 @@ pub async fn start_asio_monitor(
     backend: Option<String>,
     input_device_id: Option<String>,
 ) -> Result<MonitorInfo, String> {
+    start_monitor(app, frames, sample_rate, input, output, capture, dry_return, channels, backend, input_device_id, None).await
+}
+
+struct WasapiDuplex {
+    output_device: String,
+    output_period: u32,
+    output_rate: u32,
+    backing: Vec<u8>,
+}
+
+#[tauri::command]
+pub async fn start_wasapi_duplex(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<MonitorInfo, String> {
+    let header = |key: &str| request.headers().get(key).and_then(|value| value.to_str().ok());
+    let id = |key: &str| header(key).filter(|value| !value.is_empty() && value.len() <= 2048).map(str::to_owned);
+    let number = |key: &str| header(key).and_then(|value| value.parse::<u32>().ok()).ok_or("Configuração WASAPI inválida.");
+    let input_device = id("x-input-id").ok_or("Escolha a entrada WASAPI.")?;
+    let output_device = id("x-output-id").ok_or("Escolha a saída WASAPI.")?;
+    let output_period = number("x-output-period")?;
+    let output_rate = number("x-output-rate")?;
+    let dry_return = header("x-dry-return") == Some("1");
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("PCM inválido.".into()); };
+    if bytes.len() % 8 != 0 || bytes.len() > 192 * 1024 * 1024
+        || output_period > 32768 || !(8000..=192000).contains(&output_rate) {
+        return Err("Configuração ou PCM incompatível com a saída WASAPI.".into());
+    }
+    let duplex = WasapiDuplex { output_device, output_period, output_rate, backing: bytes.clone() };
+    start_monitor(app, number("x-input-period")?, number("x-input-rate")?, number("x-first-channel")?, 0,
+        Some(true), Some(dry_return), Some(number("x-channels")?), Some("wasapi".into()), Some(input_device), Some(duplex)).await
+}
+
+async fn start_monitor(
+    app: AppHandle, frames: u32, sample_rate: u32, input: u32, output: u32,
+    capture: Option<bool>, dry_return: Option<bool>, channels: Option<u32>,
+    backend: Option<String>, input_device_id: Option<String>, duplex: Option<WasapiDuplex>,
+) -> Result<MonitorInfo, String> {
     let capturing = capture.unwrap_or(false);
     let channels = channels.unwrap_or(1);
     if !cfg!(windows) || frames > 32768 || !(8000..=192000).contains(&sample_rate) || input > 255 || output > 255 || !(1..=2).contains(&channels) {
@@ -296,7 +331,7 @@ pub async fn start_asio_monitor(
     }
     let wasapi = backend.as_deref() == Some("wasapi");
     let path = if wasapi {
-        if !capturing || dry_return == Some(true) || !input_device_id.as_ref().is_some_and(|id| !id.is_empty() && id.len() <= 2048) {
+        if !capturing || (dry_return == Some(true) && duplex.is_none()) || !input_device_id.as_ref().is_some_and(|id| !id.is_empty() && id.len() <= 2048) {
             return Err("Escolha um dispositivo para a captura WASAPI.".into());
         }
         wasapi_host(&app)?
@@ -316,7 +351,12 @@ pub async fn start_asio_monitor(
             command.creation_flags(0x08000000);
         }
         if wasapi {
-            command.args(["--capture".to_owned(), input_device_id.unwrap_or_default(), frames.to_string(), input.to_string(), channels.to_string()]);
+            command.args([if duplex.is_some() { "--duplex" } else { "--capture" }.to_owned(),
+                input_device_id.unwrap_or_default(), frames.to_string(), input.to_string(), channels.to_string()]);
+            if let Some(output) = &duplex {
+                command.args([output.output_device.clone(), output.output_period.to_string(), output.output_rate.to_string(),
+                    if dry_return == Some(true) { "1" } else { "0" }.to_owned(), (output.backing.len() / 8).to_string()]);
+            }
         } else {
             command.args([
                 if capturing { "--capture" } else { "--monitor" }.to_owned(),
@@ -366,11 +406,25 @@ pub async fn start_asio_monitor(
             let _ = stderr.take(8192).read_to_string(&mut message);
             let _ = error_tx.send(message.trim().to_owned());
         });
-        let session = Session { child, diagnostics, capture, capture_done };
+        let mut session = Session { child, diagnostics, capture, capture_done };
+        let sent = duplex.filter(|output| !output.backing.is_empty()).map(|output| {
+            let mut stdin = session.child.stdin.take().expect("stdin redirecionado");
+            let (sender, receiver) = mpsc::channel();
+            thread::spawn(move || {
+                let result = stdin.write_all(&output.backing);
+                let _ = sender.send((stdin, result));
+            });
+            receiver
+        });
         let info = match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(info)) if info.callbacks > 0 && info.frames > 0 && info.channels == channels && info.sample_rate.is_finite() && info.sample_rate > 0.0 => info,
             _ => return Err(session.error(if wasapi { "O WASAPI não confirmou blocos de áudio." } else { "O ASIO4ALL não confirmou blocos de áudio." })),
         };
+        if let Some(sent) = sent {
+            let (stdin, result) = sent.recv_timeout(Duration::from_millis(500)).map_err(|_| "A saída WASAPI não recebeu a base.")?;
+            session.child.stdin = Some(stdin);
+            result.map_err(|error| format!("Falha ao enviar a base WASAPI: {error}"))?;
+        }
         *current = Some(session);
         Ok(info)
     })

@@ -71,7 +71,10 @@ export async function asioMonitorAvailable(): Promise<boolean> {
 }
 
 export type AsioSettings = { backend?: 'asio'; frames: number; sampleRate: number; input: number; output: number }
-export type WasapiCaptureSettings = { backend: 'wasapi'; frames: number; sampleRate: number; input: number; output: 0; inputDeviceId: string }
+export type WasapiCaptureSettings = {
+  backend: 'wasapi'; frames: number; sampleRate: number; input: number; output: 0; inputDeviceId: string
+  playback?: { device: WasapiDevice; period: number }
+}
 export type NativeCaptureSettings = AsioSettings | WasapiCaptureSettings
 export type WasapiDevice = {
   id: string; name: string; flow: 'input' | 'output'; sampleRate: number; channels: number
@@ -103,6 +106,18 @@ export async function startAsioMonitor(settings: NativeCaptureSettings & { captu
   const core = nativeCore()
   if (!core) throw new Error('O retorno ASIO exige o Vale Studio Desktop.')
   return core.invoke<AsioMonitorInfo>('start_asio_monitor', settings)
+}
+
+export async function startWasapiDuplex(settings: WasapiCaptureSettings, dryReturn: boolean, channels: 1 | 2, backing: ArrayBuffer): Promise<AsioMonitorInfo> {
+  const core = nativeCore()
+  if (!core || !settings.playback) throw new Error('Selecione a saída WASAPI no Vale Studio Desktop.')
+  const { device, period } = settings.playback
+  return core.invoke('start_wasapi_duplex', new Uint8Array(backing), { headers: {
+    'x-input-id': settings.inputDeviceId, 'x-input-period': String(settings.frames),
+    'x-input-rate': String(settings.sampleRate), 'x-first-channel': String(settings.input), 'x-channels': String(channels),
+    'x-output-id': device.id, 'x-output-period': String(period), 'x-output-rate': String(device.sampleRate),
+    'x-dry-return': dryReturn ? '1' : '0',
+  } })
 }
 
 export async function readAsioCapture(): Promise<AsioCapturePacket> {

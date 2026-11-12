@@ -1045,6 +1045,10 @@ export default function App() {
       } else if (!asio && !isPlaying && !await startPlayback(project)) return
       const channels = secondary ? 2 : recordTrack.recordChannels ?? 1
       const start = punch?.start ?? engineRef.current.getCurrentFrame(project.audioSampleRate)
+      const output = asio?.backend === 'wasapi' ? asio.playback?.device : undefined
+      if (output && dryReturn && output.sampleRate !== asio?.sampleRate) throw new Error('Para ouvir a entrada, use a mesma taxa de amostragem nos dois dispositivos WASAPI.')
+      if (output) setToast({ tone: 'info', text: 'Preparando a base para a gravação WASAPI…' })
+      const backing = output ? await engineRef.current.renderWasapiBacking(project, start, output.sampleRate) : undefined
       const sampleRate = asio?.sampleRate ?? audio.sampleRate
       await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: start, positionIsFinal: punch ? true : undefined, sampleRate, channels: secondary ? 1 : channels })
       if (secondary) await projectRepository.beginTakeDraft({ ...secondary, projectId: project.id, timelineStartFrame: start, sampleRate, channels: 1 })
@@ -1077,7 +1081,7 @@ export default function App() {
       }
       const recording = asio
         ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, channels, persistChunk,
-          (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }))
+          (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }), backing)
         : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, channels, persistChunk, punch && {
           ...punch, onEnd: (failed, reason) => {
             punchInterrupted.current = failed ? reason ?? 'A gravação foi interrompida.' : undefined
@@ -1093,7 +1097,7 @@ export default function App() {
       setAsioRecording(Boolean(asio))
       const agc = recording.inputSettings?.autoGainControl
       const bufferInfo = recording.bufferFrames ? ` · buffer de ${recording.bufferFrames} frames` : ''
-      setToast({ tone: 'info', text: loop ? 'Gravando em loop sobre a mixagem preparada.' : punch ? 'Punch programado. A reprodução começou no pré-roll.' : asio ? `Capturando pelo ${asio.backend === 'wasapi' ? 'WASAPI Shared' : 'ASIO4ALL'} · período de ${recording.periodFrames} frames${bufferInfo}.` : agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
+      setToast({ tone: 'info', text: loop ? 'Gravando em loop sobre a mixagem preparada.' : punch ? 'Punch programado. A reprodução começou no pré-roll.' : asio ? `Capturando pelo ${asio.backend === 'wasapi' ? 'WASAPI Shared' : 'ASIO4ALL'}${output ? ' com a base' : ''} · período de ${recording.periodFrames} frames${bufferInfo}.` : agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
     } catch (error) {
       if (engineRef.current.isRecording) await engineRef.current.stopRecording().catch(() => undefined)
       activeDraftRef.current = undefined
@@ -1453,7 +1457,7 @@ export default function App() {
         blocked={isPlaying || isStarting || isRecording || isMetronome || asioBusy || Boolean(previewingTakeId)}
         channels={selectedTrack?.recordChannels ?? 1}
         otherTrack={pairedMonoTrack(project, selectedTrack)?.name}
-        onRecord={(settings, twoTracks) => toggleRecording(settings, false, twoTracks)}
+        onRecord={(settings, twoTracks, dryReturn) => toggleRecording(settings, dryReturn, twoTracks)}
         prepareMix={async () => {
           if (!capabilities && !await activateAudio()) throw new Error('Ative o áudio antes de preparar a mixagem.')
           return engineRef.current.renderMix(project)
