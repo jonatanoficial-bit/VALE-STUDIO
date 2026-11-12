@@ -32,6 +32,7 @@ struct Session {
     diagnostics: mpsc::Receiver<String>,
     capture: Option<Arc<Mutex<CaptureQueue>>>,
     capture_done: mpsc::Receiver<()>,
+    wasapi_duplex: bool,
 }
 
 struct CaptureQueue {
@@ -45,6 +46,18 @@ pub struct CapturePacket {
     samples: Vec<f32>,
     ended: bool,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wasapi: Option<WasapiCaptureStats>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasapiCaptureStats {
+    rendered_backing_frames: u64,
+    empty_output_buffers: u32,
+    monitor_dropped_frames: u32,
+    monitor_underruns: u32,
+    monitor_priming_frames: u32,
 }
 
 fn read_capture(reader: &mut impl Read, capture: &Mutex<CaptureQueue>) {
@@ -76,7 +89,7 @@ impl CaptureQueue {
         let samples = (0..count)
             .map(|_| f32::from_le_bytes(std::array::from_fn(|_| self.bytes.pop_front().unwrap())))
             .collect();
-        CapturePacket { samples, ended, error: self.error.clone() }
+        CapturePacket { samples, ended, error: self.error.clone(), wasapi: None }
     }
 }
 
@@ -406,7 +419,7 @@ async fn start_monitor(
             let _ = stderr.take(8192).read_to_string(&mut message);
             let _ = error_tx.send(message.trim().to_owned());
         });
-        let mut session = Session { child, diagnostics, capture, capture_done };
+        let mut session = Session { child, diagnostics, capture, capture_done, wasapi_duplex: duplex.is_some() };
         let sent = duplex.filter(|output| !output.backing.is_empty()).map(|output| {
             let mut stdin = session.child.stdin.take().expect("stdin redirecionado");
             let (sender, receiver) = mpsc::channel();
@@ -462,6 +475,12 @@ pub async fn finish_asio_capture(app: AppHandle) -> Result<CapturePacket, String
         let mut packet = queue.drain(usize::MAX, true);
         if packet.error.is_none() && (!stopped || !drained) {
             packet.error = Some(session.error("A captura ASIO não foi encerrada normalmente."));
+        } else if stopped && drained && session.wasapi_duplex {
+            packet.wasapi = session.diagnostics.recv_timeout(Duration::from_millis(150)).ok().and_then(|message| {
+                message.lines().find_map(|line| {
+                    serde_json::from_str(line.strip_prefix("VALE_WASAPI_STATS ")?).ok()
+                })
+            });
         }
         Ok(packet)
     })

@@ -260,12 +260,13 @@ public:
   UINT32 latencyFrames;
 
   RecordingOutput(Stream& output, UINT32 inputRate, UINT32 inputPeriod, bool dry, size_t frames)
-    : stream(output), type(sampleType(*output.format)), monitorTarget(std::max(output.period, inputPeriod)), dryReturn(dry) {
+    : stream(output), type(sampleType(*output.format)),
+      monitorTarget(std::max(output.buffer, output.period + inputPeriod)), dryReturn(dry) {
     if (dry && inputRate != stream.format->nSamplesPerSec)
       throw std::runtime_error("O retorno WASAPI exige a mesma taxa de amostragem na entrada e na saída");
     if (frames > (192u * 1024 * 1024) / (2 * sizeof(float)))
       throw std::runtime_error("A base WASAPI excede o limite de duração");
-    if (dry) monitor.resize(static_cast<size_t>(monitorTarget) * 8);
+    if (dry) monitor.resize(monitorTarget * 8);
     backing.resize(frames * 2);
     if (frames && (_setmode(_fileno(stdin), _O_BINARY) < 0 ||
         std::fread(backing.data(), sizeof(float), backing.size(), stdin) != backing.size()))
@@ -305,7 +306,7 @@ public:
     const auto& format = *stream.format;
     const auto bytes = format.wBitsPerSample / 8;
     std::memset(data, 0, static_cast<size_t>(frames) * format.nBlockAlign);
-    if (dryReturn && count >= monitorTarget) monitoring = true;
+    if (stream.started && dryReturn && count >= monitorTarget) monitoring = true;
     for (UINT32 frame = 0; frame < frames; ++frame) {
       float left = 0.f, right = 0.f;
       if (cursor < backing.size()) {
@@ -331,7 +332,8 @@ public:
   void report() const {
     std::cerr << "VALE_WASAPI_STATS {\"renderedBackingFrames\":" << cursor / 2
               << ",\"emptyOutputBuffers\":" << emptyBuffers << ",\"monitorDroppedFrames\":" << monitorDrops
-              << ",\"monitorUnderruns\":" << monitorUnderruns << "}\n";
+              << ",\"monitorUnderruns\":" << monitorUnderruns
+              << ",\"monitorPrimingFrames\":" << (dryReturn ? monitorTarget : 0) << "}\n";
   }
 };
 

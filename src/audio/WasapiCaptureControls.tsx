@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { listWasapiDevices, playWasapiPcm, stopWasapiOutput, wasapiOutputRunning, type WasapiCaptureSettings, type WasapiDevice } from '../platform/desktop'
+import { listWasapiDevices, playWasapiPcm, stopWasapiOutput, wasapiOutputRunning, type WasapiCaptureSettings, type WasapiCaptureStats, type WasapiDevice } from '../platform/desktop'
 
 function supportedPeriods(device?: WasapiDevice): number[] {
   if (!device?.fundamental) return []
@@ -8,11 +8,12 @@ function supportedPeriods(device?: WasapiDevice): number[] {
     .sort((a, b) => a - b)
 }
 
-export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, onRecord, prepareMix, setAudioBusy }: {
+export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, stats, onRecord, prepareMix, setAudioBusy }: {
   armed: boolean
   blocked: boolean
   channels: 1 | 2
   otherTrack?: string
+  stats?: WasapiCaptureStats
   onRecord: (settings: WasapiCaptureSettings, twoTracks: boolean, dryReturn: boolean) => Promise<void>
   prepareMix: () => Promise<AudioBuffer>
   setAudioBusy: (busy: boolean) => void
@@ -170,5 +171,9 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, on
       void stopWasapiOutput().catch((error) => setStatus(String(error)))
     }}>Parar mixagem</button>}
     {status && <output aria-live="polite">{status}</output>}
+    {stats && <output aria-live="polite">
+      Última gravação · Saída vazia {stats.emptyOutputBuffers}
+      {stats.monitorPrimingFrames > 0 && ` · Fila do retorno vazia ${stats.monitorUnderruns} vezes · ${stats.monitorDroppedFrames} frames descartados · Pré-buffer ${stats.monitorPrimingFrames} frames`}
+    </output>}
   </details>
 }

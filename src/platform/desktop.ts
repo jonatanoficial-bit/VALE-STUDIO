@@ -100,7 +100,15 @@ export async function wasapiOutputRunning(): Promise<boolean> {
 export async function stopWasapiOutput(): Promise<void> {
   await nativeCore()?.invoke('stop_wasapi_output')
 }
-export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string }
+export type WasapiCaptureStats = {
+  renderedBackingFrames: number
+  emptyOutputBuffers: number
+  monitorDroppedFrames: number
+  monitorUnderruns: number
+  monitorPrimingFrames: number
+}
+
+export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string; wasapi?: WasapiCaptureStats }
 
 export async function startAsioMonitor(settings: NativeCaptureSettings & { capture?: boolean; dryReturn?: boolean; channels?: 1 | 2 }): Promise<AsioMonitorInfo> {
   const core = nativeCore()

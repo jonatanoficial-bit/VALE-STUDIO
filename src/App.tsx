@@ -1,6 +1,6 @@
 import { ChangeEvent, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
-import type { NativeCaptureSettings } from './platform/desktop'
+import type { NativeCaptureSettings, WasapiCaptureStats } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
 import { WasapiCaptureControls } from './audio/WasapiCaptureControls'
 import { AudioInputSelect } from './audio/AudioInputSelect'
@@ -257,13 +257,14 @@ export default function App() {
   const [asioBusy, setAsioBusy] = useState(false)
   const recordTransition = useRef(false)
   const [asioRecording, setAsioRecording] = useState(false)
+  const [wasapiStats, setWasapiStats] = useState<WasapiCaptureStats>()
   const [isStarting, setIsStarting] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [punchEnded, setPunchEnded] = useState(false)
   const [isMetronome, setIsMetronome] = useState(false)
   const [playhead, setPlayhead] = useState(0)
   const [inputPeak, setInputPeak] = useState<number>()
-  const [recordingPeaks, setRecordingPeaks] = useState<number[]>([])
+  const [recordingPeaks, setRecordingPeaks] = useState<Record<string, number[]>>({})
   const [recordFrom, setRecordFrom] = useState(0)
   const [trackPeaks, setTrackPeaks] = useState<Record<string, number>>({})
   const [toast, setToast] = useState<Toast>()
@@ -384,9 +385,16 @@ export default function App() {
       if (isPlaying && view === 'mixer') {
         setMixAutomationValues(Object.fromEntries(project.tracks.map((track) => [track.id, engineRef.current.automationControls(track, frame)])))
       }
-      setInputPeak(engineRef.current.getInputMeter()?.peak)
-      if (isRecording && selectedTrack?.kind !== 'midi') {
-        setRecordingPeaks((peaks) => [...peaks.slice(-119), Math.max(0.02, engineRef.current.getInputMeter()?.peak ?? 0.02)])
+      const input = engineRef.current.getInputMeter()
+      setInputPeak(input?.peak)
+      const draft = activeDraftRef.current
+      if (isRecording && draft) {
+        const primary = draft.secondary ? input?.channelPeaks[0] : input?.peak
+        const secondary = draft.secondary?.trackId
+        setRecordingPeaks((peaks) => ({
+          [draft.trackId]: [...(peaks[draft.trackId] ?? []).slice(-119), primary ?? 0],
+          ...(secondary ? { [secondary]: [...(peaks[secondary] ?? []).slice(-119), input?.channelPeaks[1] ?? 0] } : {}),
+        }))
       }
       const next: Record<string, number> = {}
       const masterPeak = engineRef.current.getMasterMeter()?.peak
@@ -402,7 +410,7 @@ export default function App() {
       setTrackPeaks(next)
     }, 80)
     return () => window.clearInterval(timer)
-  }, [project, isRecording, selectedTrack?.kind, isPlaying, view])
+  }, [project, isRecording, isPlaying, view])
 
   function updateProject(change: (current: AudioProject) => AudioProject, recordHistory = true) {
     setProject((current) => {
@@ -948,6 +956,7 @@ export default function App() {
       const interrupted = range && punchInterrupted.current
       const startFrame = range?.start ?? Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
       const recording = captured
+      if (recording.wasapi) setWasapiStats(recording.wasapi)
       const targets = loop
         ? loopSlices(0, recording.frames, loop.framesPerPass, loop.ids.length).filter((slice) => slice.frameCount >= 128)
           .map((slice) => ({ id: loop.ids[slice.pass], trackId: activeDraft.trackId, slice }))
@@ -1046,6 +1055,7 @@ export default function App() {
       const channels = secondary ? 2 : recordTrack.recordChannels ?? 1
       const start = punch?.start ?? engineRef.current.getCurrentFrame(project.audioSampleRate)
       const output = asio?.backend === 'wasapi' ? asio.playback?.device : undefined
+      if (asio?.backend === 'wasapi') setWasapiStats(undefined)
       if (output && dryReturn && output.sampleRate !== asio?.sampleRate) throw new Error('Para ouvir a entrada, use a mesma taxa de amostragem nos dois dispositivos WASAPI.')
       if (output) setToast({ tone: 'info', text: 'Preparando a base para a gravação WASAPI…' })
       const backing = output ? await engineRef.current.renderWasapiBacking(project, start, output.sampleRate) : undefined
@@ -1092,7 +1102,7 @@ export default function App() {
       if (punch && !await startPlayback(project)) throw new Error('Não foi possível iniciar a reprodução para o punch.')
       if (!asio && !punch) await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
       setRecordFrom(recording.startFrame)
-      setRecordingPeaks([])
+      setRecordingPeaks({ [recordTrack.id]: [0], ...(secondary ? { [secondary.trackId]: [0] } : {}) })
       setIsRecording(true)
       setAsioRecording(Boolean(asio))
       const agc = recording.inputSettings?.autoGainControl
@@ -1457,6 +1467,7 @@ export default function App() {
         blocked={isPlaying || isStarting || isRecording || isMetronome || asioBusy || Boolean(previewingTakeId)}
         channels={selectedTrack?.recordChannels ?? 1}
         otherTrack={pairedMonoTrack(project, selectedTrack)?.name}
+        stats={wasapiStats}
         onRecord={(settings, twoTracks, dryReturn) => toggleRecording(settings, dryReturn, twoTracks)}
         prepareMix={async () => {
           if (!capabilities && !await activateAudio()) throw new Error('Ative o áudio antes de preparar a mixagem.')
@@ -1553,7 +1564,7 @@ export default function App() {
               if (target) reorderTracks(track.id, target.id)
             }}>⠿</button>
           <div><strong>{track.name}</strong><small>{track.kind === 'midi' ? 'Instrumento MIDI' : track.recordChannels === 2 ? 'Entrada estéreo' : 'Entrada mono'}</small></div>
-          <TrackMeter value={track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' ? inputPeak : trackPeaks[track.id]} />
+          <TrackMeter value={isRecording ? recordingPeaks[track.id]?.at(-1) ?? trackPeaks[track.id] : trackPeaks[track.id]} />
           <div className="track-toggles">
             <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording} onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} />
             <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} />
@@ -1574,8 +1585,8 @@ export default function App() {
               setSelectedTrackId(track.id)
               updateTrack(track.id, (current) => ({ ...current, midiNotes: [...(current.midiNotes ?? []), drawn] }))
             }} />}
-          {track.id === selectedTrack?.id && isRecording && playhead >= recordFrom && track.kind !== 'midi' && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
-            <Waveform peaks={recordingPeaks.length ? recordingPeaks : [0]} color={track.color} /><small>Capturando ao vivo</small>
+          {isRecording && playhead >= recordFrom && recordingPeaks[track.id] && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
+            <Waveform peaks={recordingPeaks[track.id]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {project.clips.filter((clip) => clip.trackId === track.id && (track.compEnabled ? clipIsAudible(project, clip) : !clip.compSegment)).map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
             color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil'}

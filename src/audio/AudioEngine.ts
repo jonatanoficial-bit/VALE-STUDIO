@@ -4,7 +4,7 @@ import { clipIsAudible } from '../domain/comp'
 import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
-import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings } from '../platform/desktop'
+import { finishAsioCapture, isDesktopRuntime, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings, type WasapiCaptureStats } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
 type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; showEditor: () => void }
@@ -51,6 +51,7 @@ export type CapturedRecording = {
   channels: number
   sampleRate: number
   inputSettings?: MediaTrackSettings
+  wasapi?: WasapiCaptureStats
   durability: {
     persistedChunks: number
     persistedFrames: number
@@ -129,7 +130,7 @@ export class AudioEngine {
   private playing = false
   private stream?: MediaStream
   private inputSource?: MediaStreamAudioSourceNode
-  private inputMeter?: { peak: number; rms: number }
+  private inputMeter?: { peak: number; rms: number; channelPeaks: [number, number] }
   private recorder?: AudioWorkletNode
   private monitorGain?: GainNode
   private recordingChunks: Float32Array[] = []
@@ -985,13 +986,20 @@ export class AudioEngine {
       if (this.pendingDurableFrames >= 8192) this.queueDurableChunk()
     }
     if (this.asioCapture) this.asioCapture.frames += frames
-    let peak = 0
+    let left = 0
+    let right = 0
     let energy = 0
-    for (const sample of pcm) {
-      peak = Math.max(peak, Math.abs(sample))
+    for (let frame = 0; frame < pcm.length; frame += this.recordingChannels) {
+      const sample = pcm[frame]
+      left = Math.max(left, Math.abs(sample))
       energy += sample * sample
+      if (this.recordingChannels === 2) {
+        const other = pcm[frame + 1]
+        right = Math.max(right, Math.abs(other))
+        energy += other * other
+      }
     }
-    this.inputMeter = { peak, rms: Math.sqrt(energy / pcm.length) }
+    this.inputMeter = { peak: Math.max(left, right), rms: Math.sqrt(energy / pcm.length), channelPeaks: [left, right] }
   }
 
   async startAsioRecording(trackId: string, projectRate: number, settings: NativeCaptureSettings, dryReturn: boolean, channels: 1 | 2,
@@ -1029,7 +1037,7 @@ export class AudioEngine {
     this.monitorGain.gain.setTargetAtTime(mode === 'software' ? 0.38 : 0, this.context.currentTime, 0.015)
   }
 
-  getInputMeter(): { peak: number; rms: number } | undefined {
+  getInputMeter() {
     return this.inputMeter
   }
 
@@ -1062,6 +1070,7 @@ export class AudioEngine {
     if (!this.context || !this.recordingTrackId) return undefined
     const capture = this.asioCapture
     let flushError: string | undefined
+    let wasapi: WasapiCaptureStats | undefined
     if (!capture && !this.recorder) return undefined
     if (capture) {
       capture.stopping = true
@@ -1071,6 +1080,7 @@ export class AudioEngine {
         const tail = await finishAsioCapture()
         this.acceptRecordingPcm(Float32Array.from(tail.samples))
         capture.error ??= tail.error ?? undefined
+        wasapi = tail.wasapi
       } catch (error) {
         capture.error ??= String(error)
       }
@@ -1110,6 +1120,7 @@ export class AudioEngine {
         channels,
         sampleRate,
         inputSettings: this.recordingSettings,
+        wasapi,
         durability: { persistedChunks: this.persistedChunks, persistedFrames: this.persistedFrames, error: this.durableFailure },
       }
     } finally {
