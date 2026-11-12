@@ -2,6 +2,8 @@
 
 As imagens de referência guiam três áreas: Edição com cabeçalhos compactos e clipes coloridos, Gravação integrada ao transporte e Mixer com canais verticais. O checklist do usuário define o comportamento a validar. O formato atual de projetos, os takes, o host VST3 e os instaladores já publicados são a base da evolução.
 
+A [matriz da especificação profissional](ESPECIFICACAO-DAW.md) registra o escopo atualizado de 12 de novembro de 2026, incluindo VST3 como formato exclusivo de terceiros.
+
 ## Marco 1 · entrada e saída no Windows
 
 - Seguir a ordem de preferência, o gerenciamento de buffers e os testes descritos em [Estabilidade do áudio no Windows](ESTABILIDADE-AUDIO-WINDOWS.md). Exibir os frames efetivos e a latência de entrada e saída reportada após abrir o dispositivo.
@@ -17,7 +19,7 @@ As imagens de referência guiam três áreas: Edição com cabeçalhos compactos
 - **Atalhos**. Alternar Edição e Mixer, criar pistas, iniciar/parar, gravar, dividir, salvar, fades e loop, sem capturar teclas destinadas a campos de texto.
 - **Aceitação final**. Abrir projeto salvo pela 0.1.6, gravar e ouvir uma pista armada pelo backend validado, mudar o buffer e medir o resultado, reproduzir áudio e MIDI com os VST3 validados, editar e exportar preservando o take original. Conferir a interface com as três referências e instalar o pacote em Windows x64.
 
-A tela de edição já tem clipes coloridos com ondas preenchidas, grade por compasso ou subdivisão, editor de notas MIDI e lápis MIDI. O comping combina trechos de takes preservando as fontes e permite alternar entre o comp e o take inteiro. A gravação Web Audio aceita seleção de dispositivo por pista, e a captura WASAPI suporta duas pistas mono da mesma interface. O mixer tem EQ de três bandas, saídas para auxiliares internos e até dez sends auxiliares por pista. A automação de volume e pan oferece Off, Read, Write, Touch e Latch. As passagens de automação são confirmadas ao pausar ou parar o transporte. EQ, curvas gravadas e roteamento são usados na reprodução e na exportação. A automação de parâmetros de plugins, VST2, loop de gravação e punch continuam pendentes.
+A tela de edição já tem clipes coloridos com ondas preenchidas, grade por compasso ou subdivisão, editor de notas MIDI e lápis MIDI. O comping combina trechos de takes preservando as fontes e permite alternar entre o comp e o take inteiro. A gravação Web Audio oferece punch programado e loop de áudio com um take por passagem. A captura WASAPI suporta duas pistas mono da mesma interface. O mixer tem EQ de três bandas, saídas para auxiliares internos e até dez sends auxiliares por pista. A automação de volume e pan oferece Off, Read, Write, Touch e Latch. As passagens de automação são confirmadas ao pausar ou parar o transporte. EQ, curvas gravadas e roteamento são usados na reprodução e na exportação. A automação de parâmetros de plugins e o QuickPunch durante a reprodução continuam pendentes.
 
 Um novo instalador completo depende da validação de um backend estável e das funções da entrega. O executável de diagnóstico em `native/asio-host` é compilado à parte, com um checkout local do SDK. Seu modo de verificação abre entrada e saída, mantém a saída muda e informa a quantidade de callbacks, sem gravar amostras em disco.
 

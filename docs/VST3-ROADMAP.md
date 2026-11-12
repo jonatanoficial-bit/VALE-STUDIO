@@ -48,7 +48,7 @@ O host C++ usará o VST3 SDK oficial. A camada Tauri só oferece janela, instala
 
 No Windows x64, o host isola a varredura por módulo e mantém uma instância em processo separado por insert ativo. O AudioWorklet envia blocos estéreo e eventos de nota durante a reprodução. A exportação passa os mesmos blocos pelo host antes da mixagem. O editor nativo usa uma janela do processo do plug-in, e o estado do componente fica no perfil local do Windows.
 
-O motor ainda depende do WebView2 para entrada e saída física. O ajuste de blocos vale para os inserts. A compensação atual cobre a fila da ponte, sem incluir a latência interna informada por cada plug-in. Faltam validação de sessões longas e de instrumentos comerciais, estado portátil no backup e suporte a VST2. As instruções de compilação estão em [DESKTOP-WINDOWS.md](DESKTOP-WINDOWS.md).
+O motor interativo usa WebView2. A captura WASAPI Shared e a reprodução WASAPI da mixagem renderizada usam um host Windows nativo. O ajuste de blocos VST3 vale para os inserts. A compensação atual cobre a fila da ponte. Faltam compensação integral da latência dos plugins, validação de sessões longas e de instrumentos comerciais e estado portátil no backup. O formato de terceiros do produto é exclusivamente VST3. As instruções de compilação estão em [DESKTOP-WINDOWS.md](DESKTOP-WINDOWS.md).
 
 ## Segurança, compatibilidade e licenças
 
@@ -58,9 +58,9 @@ O motor ainda depende do WebView2 para entrada e saída física. O ajuste de blo
 - Editor gráfico de plug-in é opcional. O host precisa funcionar com interface genérica de parâmetros, pois nem todo VST3 fornece uma janela embutível.
 - O VST3 SDK é MIT, mas o uso do nome e da marca VST deve seguir as diretrizes de marca da Steinberg. A licença de cada plug-in continua independente.
 
-## Fora do escopo inicial
+## Escopo de formatos
 
-VST2, AU/AUv3, AAX, instrumentos MIDI, sandbox de processamento por plug-in, bridge em rede e suporte VST3 no GitHub Pages não fazem parte da primeira entrega.
+A especificação atual define VST3 como o único formato de terceiros. O host funciona no aplicativo Windows. Instrumentos MIDI são parte do escopo VST3. A bridge em rede segue fora da primeira entrega.
 
 ## Referências técnicas
 
