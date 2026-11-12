@@ -110,7 +110,8 @@ export type WasapiCaptureStats = {
   monitorPrimingFrames?: number
 }
 
-export type AsioCapturePacket = { samples: number[]; ended: boolean; error?: string; wasapi?: WasapiCaptureStats }
+type CaptureMetadata = { ended: boolean; error?: string; wasapi?: WasapiCaptureStats }
+export type AsioCapturePacket = CaptureMetadata & { samples: Float32Array }
 
 export async function startAsioMonitor(settings: NativeCaptureSettings & { capture?: boolean; dryReturn?: boolean; channels?: 1 | 2 }): Promise<AsioMonitorInfo> {
   const core = nativeCore()
@@ -152,16 +153,26 @@ export async function startWasapiDuplex(settings: WasapiCaptureSettings, dryRetu
   }
 }
 
-export async function readAsioCapture(): Promise<AsioCapturePacket> {
+async function receiveCapture(command: 'read_asio_capture' | 'finish_asio_capture', binary: boolean): Promise<AsioCapturePacket> {
   const core = nativeCore()
   if (!core) throw new Error('A captura ASIO exige o Vale Studio Desktop.')
-  return core.invoke('read_asio_capture')
+  const result = await core.invoke<ArrayBuffer | number[] | (CaptureMetadata & { samples: number[] })>(command, { binary })
+  if ('samples' in result) return { ...result, samples: Float32Array.from(result.samples) }
+  const buffer = Array.isArray(result) ? Uint8Array.from(result).buffer : result
+  if (buffer.byteLength < 4) throw new Error('O host enviou um bloco PCM incompleto.')
+  const headerLength = new DataView(buffer).getUint32(0, true)
+  const offset = Math.ceil((4 + headerLength) / 4) * 4
+  if (offset > buffer.byteLength || (buffer.byteLength - offset) % 4 !== 0) throw new Error('O host enviou um bloco PCM inválido.')
+  const metadata = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, headerLength))) as CaptureMetadata
+  return { ...metadata, samples: new Float32Array(buffer, offset) }
 }
 
-export async function finishAsioCapture(): Promise<AsioCapturePacket> {
-  const core = nativeCore()
-  if (!core) throw new Error('A captura ASIO exige o Vale Studio Desktop.')
-  return core.invoke('finish_asio_capture')
+export function readAsioCapture(binary = false): Promise<AsioCapturePacket> {
+  return receiveCapture('read_asio_capture', binary)
+}
+
+export function finishAsioCapture(binary = false): Promise<AsioCapturePacket> {
+  return receiveCapture('finish_asio_capture', binary)
 }
 
 export async function stopAsioMonitor(): Promise<void> {

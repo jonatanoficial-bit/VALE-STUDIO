@@ -139,7 +139,7 @@ export class AudioEngine {
   private loopPlayback?: { start: number; end: number; seconds: number; passes: number }
   private recordingSettings?: MediaTrackSettings
   private asioCapture?: {
-    rate: number; frames: number; timer?: number
+    rate: number; frames: number; binary: boolean; timer?: number
     pending?: Promise<void>; error?: string; stopping: boolean
   }
   private resolveFlush?: () => void
@@ -1043,21 +1043,23 @@ export class AudioEngine {
     }
     this.recordingSettings = undefined
     this.prepareRecording(trackId, projectRate, channels, onPcmChunk)
-    const capture: NonNullable<AudioEngine['asioCapture']> = { rate: info.sampleRate, frames: 0, stopping: false }
+    const capture: NonNullable<AudioEngine['asioCapture']> = { rate: info.sampleRate, frames: 0, binary: settings.backend === 'wasapi', stopping: false }
     this.asioCapture = capture
     const poll = () => {
       if (capture.stopping) return
-      capture.pending = readAsioCapture().then((packet) => {
-        this.acceptRecordingPcm(Float32Array.from(packet.samples))
+      let delay = 80
+      capture.pending = readAsioCapture(capture.binary).then((packet) => {
+        this.acceptRecordingPcm(packet.samples)
+        if (packet.samples.length / channels >= 8192) delay = 0
         if (packet.error || packet.ended) throw new Error(packet.error ?? 'O driver nativo interrompeu a captura.')
       }).catch((error) => {
         capture.error = String(error)
         if (!capture.stopping) onFailure(capture.error)
       }).finally(() => {
-        if (!capture.stopping && !capture.error) capture.timer = window.setTimeout(poll, 80)
+        if (!capture.stopping && !capture.error) capture.timer = window.setTimeout(poll, delay)
       })
     }
-    capture.timer = window.setTimeout(poll, 80)
+    poll()
     return { startFrame: this.recordingStartFrame, periodFrames: info.frames, bufferFrames: info.bufferFrames }
   }
 
@@ -1106,8 +1108,8 @@ export class AudioEngine {
       window.clearTimeout(capture.timer)
       await capture.pending
       try {
-        const tail = await finishAsioCapture()
-        this.acceptRecordingPcm(Float32Array.from(tail.samples))
+        const tail = await finishAsioCapture(capture.binary)
+        this.acceptRecordingPcm(tail.samples)
         capture.error = tail.error ?? capture.error
         wasapi = tail.wasapi
       } catch (error) {

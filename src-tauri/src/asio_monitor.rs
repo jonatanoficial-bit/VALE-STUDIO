@@ -103,6 +103,7 @@ struct CaptureQueue {
     bytes: VecDeque<u8>,
     error: Option<String>,
     channels: usize,
+    capacity: usize,
 }
 
 #[derive(Serialize)]
@@ -112,6 +113,25 @@ pub struct CapturePacket {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wasapi: Option<WasapiCaptureStats>,
+}
+
+impl CapturePacket {
+    fn into_response(self, binary: bool) -> Result<tauri::ipc::Response, String> {
+        if !binary {
+            return serde_json::to_string(&self).map(tauri::ipc::Response::new).map_err(|error| error.to_string());
+        }
+        let header = serde_json::to_vec(&serde_json::json!({ "ended": self.ended, "error": self.error, "wasapi": self.wasapi }))
+            .map_err(|error| error.to_string())?;
+        let pcm_offset = (4 + header.len()).next_multiple_of(4);
+        let mut bytes = Vec::with_capacity(pcm_offset + self.samples.len() * 4);
+        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.resize(pcm_offset, 0);
+        for sample in self.samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        Ok(tauri::ipc::Response::new(bytes))
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -138,10 +158,10 @@ fn read_capture(reader: &mut impl Read, capture: &Mutex<CaptureQueue>) {
         let Ok(mut queue) = capture.lock() else { return };
         match next {
             Ok(0) => return,
-            Ok(count) if queue.bytes.len() + count <= 1024 * 1024 && queue.error.is_none() => {
+            Ok(count) if queue.bytes.len() + count <= queue.capacity && queue.error.is_none() => {
                 queue.bytes.extend(&block[..count]);
             }
-            Ok(_) => { queue.error.get_or_insert("A fila de captura ASIO excedeu o limite.".into()); }
+            Ok(_) => { queue.error.get_or_insert("A fila de captura nativa excedeu o limite.".into()); }
             Err(error) => {
                 queue.error.get_or_insert(format!("Falha na leitura da captura ASIO: {error}"));
                 return;
@@ -170,7 +190,7 @@ mod tests {
 
     #[test]
     fn stereo_packets_keep_frames_intact_across_pipe_reads() {
-        let mut queue = CaptureQueue { bytes: VecDeque::new(), error: None, channels: 2 };
+        let mut queue = CaptureQueue { bytes: VecDeque::new(), error: None, channels: 2, capacity: 1024 * 1024 };
         queue.bytes.extend(0.25_f32.to_le_bytes());
         assert!(queue.drain(1, false).samples.is_empty());
 
@@ -186,10 +206,13 @@ mod tests {
 impl Session {
     fn stop(&mut self) -> bool {
         drop(self.child.stdin.take());
-        let deadline = Instant::now() + Duration::from_millis(450);
-        while Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
             if let Ok(Some(status)) = self.child.try_wait() {
                 return status.success();
+            }
+            if Instant::now() >= deadline {
+                break;
             }
             thread::sleep(Duration::from_millis(15));
         }
@@ -202,6 +225,7 @@ impl Session {
         self.diagnostics
             .recv_timeout(Duration::from_millis(150))
             .ok()
+            .map(|message| message.lines().filter(|line| !line.starts_with("VALE_WASAPI_STATS ")).collect::<Vec<_>>().join("\n"))
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| fallback.to_owned())
     }
@@ -468,6 +492,7 @@ async fn start_monitor(
         let (capture_done_tx, capture_done) = mpsc::channel();
         let capture = capturing.then(|| Arc::new(Mutex::new(CaptureQueue {
             bytes: VecDeque::new(), error: None, channels: channels as usize,
+            capacity: if wasapi { 16 * 1024 * 1024 } else { 1024 * 1024 },
         })));
         let stream_capture = capture.clone();
         let stdout = child.stdout.take().expect("stdout redirecionado");
@@ -522,7 +547,7 @@ async fn start_monitor(
 }
 
 #[tauri::command]
-pub fn read_asio_capture(app: AppHandle) -> Result<CapturePacket, String> {
+pub fn read_asio_capture(app: AppHandle, binary: Option<bool>) -> Result<tauri::ipc::Response, String> {
     let state = app.state::<Monitor>();
     let mut current = state.0.lock().map_err(|_| "Estado ASIO indisponível.")?;
     let session = current.as_mut().ok_or("Nenhuma captura ASIO está aberta.")?;
@@ -532,11 +557,11 @@ pub fn read_asio_capture(app: AppHandle) -> Result<CapturePacket, String> {
     // The stdout reader can still have buffered bytes after child exit.
     let mut packet = queue.drain(32768, false);
     packet.ended = ended;
-    Ok(packet)
+    packet.into_response(binary.unwrap_or(false))
 }
 
 #[tauri::command]
-pub async fn finish_asio_capture(app: AppHandle) -> Result<CapturePacket, String> {
+pub async fn finish_asio_capture(app: AppHandle, binary: Option<bool>) -> Result<tauri::ipc::Response, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Monitor>();
         let mut current = state.0.lock().map_err(|_| "Estado ASIO indisponível.")?;
@@ -545,7 +570,7 @@ pub async fn finish_asio_capture(app: AppHandle) -> Result<CapturePacket, String
         }
         let mut session = current.take().expect("captura verificada");
         let stopped = session.stop();
-        let drained = session.capture_done.recv_timeout(Duration::from_millis(500)).is_ok();
+        let drained = session.capture_done.recv_timeout(Duration::from_secs(3)).is_ok();
         let capture = session.capture.as_ref().expect("fila de captura verificada");
         let mut queue = capture.lock().map_err(|_| "Fila de captura ASIO indisponível.")?;
         let mut packet = queue.drain(usize::MAX, true);
@@ -558,7 +583,7 @@ pub async fn finish_asio_capture(app: AppHandle) -> Result<CapturePacket, String
                 })
             });
         }
-        Ok(packet)
+        packet.into_response(binary.unwrap_or(false))
     })
     .await
     .map_err(|error| error.to_string())?
