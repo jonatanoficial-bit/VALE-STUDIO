@@ -945,7 +945,7 @@ export default function App() {
       const activeDraft = activeDraftRef.current
       let captured
       try {
-        captured = await engineRef.current.stopRecording()
+        captured = await engineRef.current.stopRecording(Boolean(activeDraft?.secondary))
       } catch (error) {
         setToast({ tone: 'error', text: `${String(error)} Os checkpoints confirmados continuam em Projeto → Recuperação.` })
         void projectRepository.listTakeDrafts(project.id).then(setTakeDrafts)
@@ -987,22 +987,22 @@ export default function App() {
       const lastFullPass = loop ? targets.reduce((last, target, index) => target.slice?.frameCount === loop.framesPerPass ? index : last, -1) : -1
       const selectedPass = lastFullPass >= 0 ? lastFullPass : targets.length - 1
       const entries = targets.map((target, index) => {
-        let buffer = recording.buffer
+        let buffer = recording.buffers[activeDraft.secondary ? index : 0]
         if (target.slice) {
           const { offset, frameCount } = target.slice
           buffer = new AudioBuffer({ length: frameCount, numberOfChannels: recording.channels, sampleRate: recording.sampleRate })
           for (let channel = 0; channel < recording.channels; channel += 1) {
-            buffer.getChannelData(channel).set(recording.buffer.getChannelData(channel).subarray(offset, offset + frameCount))
+            buffer.getChannelData(channel).set(recording.buffers[0].getChannelData(channel).subarray(offset, offset + frameCount))
           }
-        } else if (activeDraft.secondary) buffer = engineRef.current.createBufferFromPcm(recording.buffer.getChannelData(index), recording.sampleRate)
-        const blob = buffer === recording.buffer ? recording.blob : encodeWav(buffer, 32)
+        }
+        const blob = encodeWav(buffer, 32)
         const assetId = makeId()
         const takeId = makeId()
         const asset: MediaAsset = {
           id: assetId, name: `Take ${project.takes.filter((take) => take.trackId === target.trackId).length + (loop ? index : 0) + 1}.wav`, mimeType: 'audio/wav',
           sampleRate: buffer.sampleRate, channels: buffer.numberOfChannels, frames: buffer.length,
           durationFrames: Math.round(buffer.length / buffer.sampleRate * project.audioSampleRate), byteLength: blob.size,
-          peaks: buffer === recording.buffer ? recording.peaks : buildPeaks(buffer), createdAt: new Date().toISOString(),
+          peaks: buildPeaks(buffer), createdAt: new Date().toISOString(),
         }
         const clip: Clip = { id: makeId(), assetId, trackId: target.trackId, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
         const take = { id: takeId, assetId, trackId: target.trackId, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames,

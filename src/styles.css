@@ -195,6 +195,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .aux-routing { display: grid; gap: 10px; border: 1px solid #2a4762; border-radius: 8px; margin: 12px 0; min-width: 0; }
 .aux-routing label { display: grid; gap: 4px; }
 .aux-send { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; }
+.aux-send button[aria-pressed='true'] { border-color: #ff5362; background: #661b28; color: #fff1f1; }
 .midi-panel { margin: 18px clamp(14px, 3vw, 27px); padding: 17px; display: flex; justify-content: space-between; align-items: center; gap: 18px; border: 1px solid #315d7c; border-radius: 16px; background: radial-gradient(circle at 92% 0%, #a855f724, transparent 30%), #091827; }
 .midi-panel h3 { margin: 5px 0; font-size: 17px; }.midi-panel p { max-width: 610px; margin: 0; color: #90aac1; font-size: 11px; line-height: 1.5; }.midi-controls { display: grid; gap: 8px; min-width: 240px; }.midi-controls select { padding: 10px; color: #dff5ff; background: #071422; border: 1px solid #30536e; border-radius: 9px; }.midi-controls small { color: #7897ae; font-size: 10px; line-height: 1.4; }
 @keyframes live-wave { 50% { filter: brightness(1.3); } }

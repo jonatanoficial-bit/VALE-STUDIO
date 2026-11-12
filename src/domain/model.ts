@@ -6,6 +6,7 @@ export const AUTOMATION_MODES = ['off', 'read', 'write', 'touch', 'latch'] as co
 export type AutomationMode = typeof AUTOMATION_MODES[number]
 export type TrackAutomation = { mode: AutomationMode; gainDb?: AutomationPoint[]; pan?: AutomationPoint[] }
 export type AuxBus = { id: string; name: string; gainDb: number; mute: boolean }
+export type AuxSend = { busId: string; level: number; tap?: 'pre' | 'post'; pan?: number; mute?: boolean }
 export const MAX_AUX_SENDS = 10
 export const DEFAULT_VST_BUFFER_FRAMES = 512
 
@@ -96,7 +97,7 @@ export type Track = {
   pan: number
   sends?: { reverb: number; delay: number }
   outputBusId?: string
-  auxSends?: Array<{ busId: string; level: number }>
+  auxSends?: AuxSend[]
   mute: boolean
   solo: boolean
   armed: boolean

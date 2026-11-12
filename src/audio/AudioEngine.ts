@@ -1,7 +1,6 @@
 import type { AudioProject, AutomationLane, Clip, MonitorMode, Track, TrackAutomation } from '../domain/model'
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { clipIsAudible } from '../domain/comp'
-import { buildPeaks } from './peaks'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
 import { finishAsioCapture, isDesktopRuntime, MAX_WASAPI_BACKING_FRAMES, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings, type WasapiCaptureStats } from '../platform/desktop'
@@ -20,6 +19,7 @@ type TrackGraph = {
   panner: StereoPannerNode
   analyser: AnalyserNode
   sends: Record<'reverb' | 'delay', GainNode>
+  preFaderGate?: GainNode
   input?: AudioNode
   instrument?: AudioWorkletNode
   automationState?: { settings: Track['automation']; muted: boolean; values: Partial<Record<AutomationLane, number>> }
@@ -44,9 +44,7 @@ export type AudioCapabilities = {
 }
 
 export type CapturedRecording = {
-  blob: Blob
-  buffer: AudioBuffer
-  peaks: number[]
+  buffers: AudioBuffer[]
   frames: number
   channels: number
   sampleRate: number
@@ -435,6 +433,9 @@ export class AudioEngine {
   }
 
   private applyTrackAutomation(graph: TrackGraph, track: Track, muted: boolean, frame: number, rate: number, at: number, pass?: AutomationPass): void {
+    if (graph.automationState?.muted !== muted) {
+      graph.preFaderGate?.gain.setTargetAtTime(muted ? 0 : 1, at, 0.015)
+    }
     const automation = track.automation
     const changed = graph.automationState?.settings !== automation || graph.automationState?.muted !== muted
     const values: Partial<Record<AutomationLane, number>> = {}
@@ -512,14 +513,30 @@ export class AudioEngine {
     }))
   }
 
-  private routeTrackOutput(source: AudioNode, track: Track, output: AudioNode, auxes: Map<string, GainNode>): void {
-    source.connect(auxes.get(track.outputBusId ?? '') ?? output)
+  private routeTrackOutput(source: AudioNode, graph: TrackGraph, track: Track, output: AudioNode, auxes: Map<string, GainNode>,
+    align?: (node: AudioNode) => AudioNode): void {
+    const postFader = align?.(source) ?? source
+    postFader.connect(auxes.get(track.outputBusId ?? '') ?? output)
+    let preFader: AudioNode | undefined
     for (const send of track.auxSends ?? []) {
       const destination = auxes.get(send.busId)
-      if (!destination || send.busId === track.outputBusId || send.level === 0) continue
+      if (!destination || send.busId === track.outputBusId || send.mute || sendLevel(send.level) === 0) continue
       const gain = source.context.createGain()
       gain.gain.value = sendLevel(send.level)
-      source.connect(gain).connect(destination)
+      if (send.tap === 'pre' && !preFader) {
+        const gate = source.context.createGain()
+        gate.gain.value = graph.fader.gain.value === 0 ? 0 : 1
+        graph.preFaderGate = gate
+        graph.panner.connect(gate)
+        preFader = align?.(gate) ?? gate
+      }
+      const tap = send.tap === 'pre' ? preFader! : postFader
+      tap.connect(gain)
+      if (send.pan && Number.isFinite(send.pan)) {
+        const pan = source.context.createStereoPanner()
+        pan.pan.value = Math.max(-1, Math.min(1, send.pan))
+        gain.connect(pan).connect(destination)
+      } else gain.connect(destination)
     }
   }
 
@@ -760,7 +777,7 @@ export class AudioEngine {
         delay.delayTime.value = compensation
         return source.connect(delay)
       }
-      this.routeTrackOutput(align(taps.main), track, output, this.liveAuxes)
+      this.routeTrackOutput(taps.main, this.liveGraphs.get(track.id)!, track, output, this.liveAuxes, align)
       align(taps.reverb).connect(buses.reverb)
       align(taps.delay).connect(buses.delay)
     }
@@ -1078,7 +1095,7 @@ export class AudioEngine {
     return { peak, rms: Math.sqrt(sum / data.length) }
   }
 
-  async stopRecording(): Promise<CapturedRecording | undefined> {
+  async stopRecording(splitStereo = false): Promise<CapturedRecording | undefined> {
     if (!this.context || !this.recordingTrackId) return undefined
     const capture = this.asioCapture
     let flushError: string | undefined
@@ -1114,9 +1131,12 @@ export class AudioEngine {
       const channels = this.recordingChannels
       const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length / channels, 0)
       const sampleRate = capture?.rate ?? this.context.sampleRate
-      const buffer = this.context.createBuffer(channels, Math.max(1, frames), sampleRate)
+      const split = splitStereo && channels === 2
+      const buffers = split
+        ? [this.context.createBuffer(1, Math.max(1, frames), sampleRate), this.context.createBuffer(1, Math.max(1, frames), sampleRate)]
+        : [this.context.createBuffer(channels, Math.max(1, frames), sampleRate)]
       for (let channel = 0; channel < channels; channel += 1) {
-        const output = buffer.getChannelData(channel)
+        const output = split ? buffers[channel].getChannelData(0) : buffers[0].getChannelData(channel)
         let offset = 0
         for (const chunk of this.recordingChunks) {
           for (let sample = channel; sample < chunk.length; sample += channels) {
@@ -1125,9 +1145,7 @@ export class AudioEngine {
         }
       }
       return {
-        blob: encodeWav(buffer, 32),
-        buffer,
-        peaks: buildPeaks(buffer),
+        buffers,
         frames,
         channels,
         sampleRate,
@@ -1268,8 +1286,8 @@ export class AudioEngine {
     for (const track of project.tracks) {
       if (track.mute || (soloActive && !track.solo)) continue
       const output = offline.createGain()
-      this.routeTrackOutput(output, track, master, auxes)
       const graph = this.makeTrackGraph(offline, track, output, soloActive, buses)
+      this.routeTrackOutput(output, graph, track, master, auxes)
       this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
       await this.scheduleRenderTrack(offline, project, track, graph)
     }
@@ -1317,8 +1335,8 @@ export class AudioEngine {
     master.gain.value = 0.92
     master.connect(offline.destination)
     const output = offline.createGain()
-    this.routeTrackOutput(output, track, master, this.makeAuxBuses(offline, project, master))
     const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, output, false, this.makeSendBuses(offline, master))
+    this.routeTrackOutput(output, graph, track, master, this.makeAuxBuses(offline, project, master))
     this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
     await this.scheduleRenderTrack(offline, project, track, graph)
     return offline.startRendering()

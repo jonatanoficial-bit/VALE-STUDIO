@@ -97,7 +97,10 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
       for (const value of item.auxSends) {
         const send = asRecord(value)
         if (!send || typeof send.busId !== 'string' || send.busId === item.outputBusId || !auxIds.has(send.busId) || seen.has(send.busId) ||
-          typeof send.level !== 'number' || !Number.isFinite(send.level) || send.level < 0 || send.level > 1) return true
+          typeof send.level !== 'number' || !Number.isFinite(send.level) || send.level < 0 || send.level > 1 ||
+          (send.tap !== undefined && send.tap !== 'pre' && send.tap !== 'post') ||
+          (send.pan !== undefined && (typeof send.pan !== 'number' || !Number.isFinite(send.pan) || Math.abs(send.pan) > 1)) ||
+          (send.mute !== undefined && typeof send.mute !== 'boolean')) return true
         seen.add(send.busId)
       }
     }

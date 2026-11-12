@@ -12,23 +12,11 @@ type LameApi = { Mp3Encoder: new (channels: number, sampleRate: number, kbps: nu
 // It is never fetched from a CDN or renamed from another audio container.
 const lamejs = new Function(`${lameSource}\nreturn lamejs;`)() as LameApi
 
-function interleave(buffer: AudioBuffer): Float32Array {
-  const channels = buffer.numberOfChannels
-  const frames = buffer.length
-  const output = new Float32Array(frames * channels)
-
-  for (let channel = 0; channel < channels; channel += 1) {
-    const data = buffer.getChannelData(channel)
-    for (let frame = 0; frame < frames; frame += 1) output[frame * channels + channel] = data[frame]
-  }
-  return output
-}
-
 export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): Blob {
   const channels = buffer.numberOfChannels
   const bytesPerSample = bitDepth / 8
-  const pcm = interleave(buffer)
-  const dataLength = pcm.length * bytesPerSample
+  const pcm = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel))
+  const dataLength = buffer.length * channels * bytesPerSample
   const output = new ArrayBuffer(44 + dataLength)
   const view = new DataView(output)
   const writeText = (offset: number, value: string) => [...value].forEach((char, index) => view.setUint8(offset + index, char.charCodeAt(0)))
@@ -48,20 +36,25 @@ export function encodeWav(buffer: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): Blo
   view.setUint32(40, dataLength, true)
 
   let offset = 44
-  pcm.forEach((sample) => {
-    const clamped = Math.max(-1, Math.min(1, sample))
-    if (bitDepth === 16) {
-      view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true)
-    } else if (bitDepth === 24) {
-      const value = Math.round(clamped * 0x7fffff)
-      view.setUint8(offset, value & 0xff)
-      view.setUint8(offset + 1, (value >> 8) & 0xff)
-      view.setUint8(offset + 2, (value >> 16) & 0xff)
-    } else {
-      view.setFloat32(offset, sample, true)
+  for (let frame = 0; frame < buffer.length; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const sample = pcm[channel][frame]
+      if (bitDepth === 32) {
+        view.setFloat32(offset, sample, true)
+      } else {
+        const clamped = Math.max(-1, Math.min(1, sample))
+        if (bitDepth === 16) {
+          view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true)
+        } else {
+          const value = Math.round(clamped * 0x7fffff)
+          view.setUint8(offset, value & 0xff)
+          view.setUint8(offset + 1, (value >> 8) & 0xff)
+          view.setUint8(offset + 2, (value >> 16) & 0xff)
+        }
+      }
+      offset += bytesPerSample
     }
-    offset += bytesPerSample
-  })
+  }
 
   return new Blob([output], { type: 'audio/wav' })
 }
