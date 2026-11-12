@@ -366,6 +366,7 @@ export class AudioEngine {
   }
 
   private makeTrackGraph(context: AudioContext | OfflineAudioContext, track: Track, destination: AudioNode, soloActive: boolean, buses: SendBuses): TrackGraph {
+    const live = context === this.context
     const highPass = context.createBiquadFilter()
     highPass.type = 'highpass'
     highPass.frequency.value = track.effects.highPassEnabled ? track.effects.highPassHz : 10
@@ -388,7 +389,6 @@ export class AudioEngine {
 
     const dry = context.createGain()
     const reverb = context.createConvolver()
-    reverb.buffer = createImpulse(context)
     const reverbGain = context.createGain()
     reverbGain.gain.value = track.effects.reverbEnabled ? track.effects.reverbMix : 0
 
@@ -407,16 +407,21 @@ export class AudioEngine {
 
     highPass.connect(eq.low).connect(eq.mid).connect(eq.high).connect(compressor)
     compressor.connect(dry).connect(panner)
-    compressor.connect(reverb).connect(reverbGain).connect(panner)
-    compressor.connect(delay).connect(delayGain).connect(panner)
-    delay.connect(delayFeedback).connect(delay)
+    if (live || track.effects.reverbEnabled) {
+      reverb.buffer = createImpulse(context)
+      compressor.connect(reverb).connect(reverbGain).connect(panner)
+    }
+    if (live || track.effects.delayEnabled) {
+      compressor.connect(delay).connect(delayGain).connect(panner)
+      delay.connect(delayFeedback).connect(delay)
+    }
     const analyser = context.createAnalyser()
     analyser.fftSize = 512
     panner.connect(fader).connect(analyser).connect(destination)
     const sends = { reverb: context.createGain(), delay: context.createGain() }
     for (const bus of ['reverb', 'delay'] as const) {
       sends[bus].gain.value = sendLevel(track.sends?.[bus])
-      fader.connect(sends[bus]).connect(buses[bus])
+      if (live || sends[bus].gain.value > 0) fader.connect(sends[bus]).connect(buses[bus])
     }
 
     return { highPass, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }

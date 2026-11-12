@@ -26,7 +26,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
   const [outputFrames, setOutputFrames] = useState(0)
   const [monitor, setMonitor] = useState(false)
   const [playing, setPlaying] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'devices' | 'record'>()
   const [status, setStatus] = useState('')
   const device = devices.find((item) => item.id === deviceId)
   const output = devices.find((item) => item.id === outputId)
@@ -40,7 +40,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
   }, [setAudioBusy])
 
   async function refresh() {
-    setBusy(true)
+    setBusy('devices')
     setStatus('')
     try {
       const found = (await listWasapiDevices()).filter((item) => item.sampleRate > 0 && item.standard > 0)
@@ -56,7 +56,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
     } catch (error) {
       setStatus(String(error))
     } finally {
-      setBusy(false)
+      setBusy(undefined)
     }
   }
 
@@ -108,7 +108,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
 
   async function record(twoTracks: boolean) {
     if (!device) return
-    setBusy(true)
+    setBusy('record')
     try {
       await onRecord({
         backend: 'wasapi', frames, sampleRate: device.sampleRate,
@@ -117,14 +117,14 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
         playback: output ? { device: output, period: outputFrames } : undefined,
       }, twoTracks, canMonitor && monitor)
     } finally {
-      setBusy(false)
+      setBusy(undefined)
     }
   }
 
   return <details className="asio-monitor-controls">
     <summary>Áudio nativo · WASAPI Shared</summary>
-    <fieldset disabled={blocked || busy}>
-      <button type="button" className="button secondary" onClick={() => void refresh()}>{busy ? 'Consultando…' : 'Listar dispositivos WASAPI'}</button>
+    <fieldset disabled={blocked || Boolean(busy)}>
+      <button type="button" className="button secondary" onClick={() => void refresh()}>{busy === 'devices' ? 'Consultando…' : 'Listar dispositivos WASAPI'}</button>
       {device && <>
         <label>Dispositivo WASAPI <select value={deviceId} onChange={(event) => {
           setDeviceId(event.target.value)
@@ -171,6 +171,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
       void stopWasapiOutput().catch((error) => setStatus(String(error)))
     }}>Parar mixagem</button>}
     {status && <output aria-live="polite">{status}</output>}
+    {busy === 'record' && <output aria-live="polite">Preparando a gravação WASAPI…</output>}
     {stats && <output aria-live="polite">
       Última gravação · Saída vazia {stats.emptyOutputBuffers}
       {stats.monitorPrimingFrames > 0 && ` · Fila do retorno vazia ${stats.monitorUnderruns} vezes · ${stats.monitorDroppedFrames} frames descartados · Pré-buffer ${stats.monitorPrimingFrames} frames`}
