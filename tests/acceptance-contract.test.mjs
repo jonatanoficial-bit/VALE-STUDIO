@@ -13,7 +13,7 @@ test('o núcleo declara captura por AudioWorklet e não usa ScriptProcessor', as
 
 test('o worklet captura PCM e não roteia a captura para a saída', async () => {
   const worklet = await read('public/worklets/pcm-recorder.worklet.js')
-  assert.match(worklet, /channel\.slice\(\)\.buffer/)
+  assert.match(worklet, /channel\.slice\(start, end\)\.buffer/)
   assert.match(worklet, /channel\.fill\(0\)/)
 })
 

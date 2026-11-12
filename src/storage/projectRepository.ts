@@ -47,6 +47,7 @@ export type TakeDraft = {
   projectId: string
   trackId: string
   timelineStartFrame: number
+  positionIsFinal?: boolean
   sampleRate: number
   channels: number
   createdAt: string

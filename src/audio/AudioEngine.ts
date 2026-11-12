@@ -74,6 +74,8 @@ export type RecordingStart = {
   startFrame: number
 }
 
+export type RecordingWindow = { start: number; end: number; onEnd: (interrupted: boolean, reason?: string) => void; loop?: { audio: AudioBuffer; passes: number } }
+
 export type StemExport = {
   trackId: string
   trackName: string
@@ -134,6 +136,8 @@ export class AudioEngine {
   private recordingChannels: 1 | 2 = 1
   private recordingTrackId?: string
   private recordingStartFrame = 0
+  private recordingWindow?: RecordingWindow
+  private loopPlayback?: { start: number; end: number; seconds: number; passes: number }
   private recordingSettings?: MediaTrackSettings
   private asioCapture?: {
     rate: number; frames: number; timer?: number
@@ -162,7 +166,7 @@ export class AudioEngine {
     }
     if (this.context.state !== 'running') await this.context.resume()
     if (this.context.audioWorklet && !this.workletLoaded) {
-      await this.context.audioWorklet.addModule(`${import.meta.env.BASE_URL}worklets/pcm-recorder.worklet.js`)
+      await this.context.audioWorklet.addModule(`${import.meta.env.BASE_URL}worklets/pcm-recorder.worklet.js?v=2`)
       this.workletLoaded = true
     }
     return {
@@ -298,6 +302,12 @@ export class AudioEngine {
       return this.recordingStartFrame + Math.round(this.asioCapture.frames * projectRate / this.asioCapture.rate)
     }
     if (!this.playing || !this.context) return this.playheadStartFrame
+    if (this.loopPlayback) {
+      const loop = this.loopPlayback
+      const elapsed = Math.max(0, this.context.currentTime - this.playStartedAt)
+      if (elapsed >= loop.seconds * loop.passes) return loop.end
+      return Math.min(loop.end, loop.start + Math.floor((elapsed % loop.seconds) / loop.seconds * (loop.end - loop.start)))
+    }
     return Math.max(this.playheadStartFrame, this.playheadStartFrame + Math.round((this.context.currentTime - this.playStartedAt) * projectRate))
   }
 
@@ -680,6 +690,26 @@ export class AudioEngine {
     const context = this.context
     this.stopPreview()
     this.stopSources()
+    const window = this.recordingWindow
+    if (window?.loop && this.recorder) {
+      const { audio, passes } = window.loop
+      const source = context.createBufferSource()
+      source.buffer = audio
+      source.loop = true
+      this.master.gain.value = 1
+      source.connect(this.master)
+      const first = Math.ceil((context.currentTime + 0.12) * context.sampleRate)
+      const end = first + audio.length * passes
+      this.playStartedAt = first / context.sampleRate
+      this.loopPlayback = { start: window.start, end: window.end, seconds: audio.duration, passes }
+      this.playheadStartFrame = window.start
+      this.recorder.port.postMessage({ type: 'window', start: first, end })
+      this.sources.add(source)
+      source.start(this.playStartedAt)
+      source.stop(end / context.sampleRate)
+      this.playing = true
+      return true
+    }
     const soloActive = project.tracks.some((track) => track.solo)
     const generation = this.playGeneration
     const startFrame = this.playheadStartFrame
@@ -721,7 +751,7 @@ export class AudioEngine {
       align(taps.reverb).connect(buses.reverb)
       align(taps.delay).connect(buses.delay)
     }
-    const startAt = context.currentTime + 0.04
+    const startAt = context.currentTime + (this.recordingWindow ? 0.12 : 0.04)
     const from = startFrame / project.audioSampleRate
     const pass = new AutomationPass(project.tracks, startFrame, project.audioSampleRate)
     this.automationPlayback = { pass, rate: project.audioSampleRate }
@@ -741,7 +771,18 @@ export class AudioEngine {
       const graph = this.liveGraphs.get(clip.trackId)
       if (buffer && graph) this.createSource(buffer, graph, project.audioSampleRate, clip, startFrame, startAt)
     }
-    this.playStartedAt = startAt
+    this.playStartedAt = startAt + (this.recordingWindow ? maxLatency : 0)
+    if (this.recordingWindow && this.recorder) {
+      const window = this.recordingWindow
+      const first = Math.round((this.playStartedAt + (window.start - startFrame) / project.audioSampleRate) * context.sampleRate)
+      const end = Math.round((this.playStartedAt + (window.end - startFrame) / project.audioSampleRate) * context.sampleRate)
+      this.recorder.port.postMessage({ type: 'window', start: first, end })
+      const graph = this.recordingTrackId ? this.liveGraphs.get(this.recordingTrackId) : undefined
+      if (graph && this.monitorGain) {
+        this.monitorGain.disconnect()
+        this.monitorGain.connect(graph.input ?? graph.highPass)
+      }
+    }
     this.playing = true
     return true
   }
@@ -766,6 +807,7 @@ export class AudioEngine {
 
   private stopSources(): void {
     this.playGeneration += 1
+    this.loopPlayback = undefined
     this.liveVstNotes.clear()
     for (const insert of this.nativeInserts.splice(0)) {
       insert.close()
@@ -791,7 +833,7 @@ export class AudioEngine {
 
   updateMix(project: AudioProject): void {
     const at = this.context?.currentTime ?? 0
-    this.master?.gain.setTargetAtTime(masterLevel(project), at, 0.015)
+    if (!this.loopPlayback) this.master?.gain.setTargetAtTime(masterLevel(project), at, 0.015)
     for (const bus of project.auxBuses ?? []) {
       this.liveAuxes.get(bus.id)?.gain.setTargetAtTime(bus.mute ? 0 : dbToGain(bus.gainDb), at, 0.015)
     }
@@ -869,7 +911,8 @@ export class AudioEngine {
     })
   }
 
-  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode, channels: 1 | 2, onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>): Promise<RecordingStart> {
+  async startRecording(trackId: string, project: AudioProject, mode: MonitorMode, channels: 1 | 2,
+    onPcmChunk?: (chunk: RecordingPcmChunk) => Promise<void>, window?: RecordingWindow): Promise<RecordingStart> {
     if (!this.context || !this.context.audioWorklet) throw new Error('AudioWorklet não está disponível. A gravação multipista não pode ser iniciada com segurança neste navegador.')
     if (this.recordingTrackId) throw new Error('Já existe uma gravação em andamento.')
 
@@ -881,6 +924,7 @@ export class AudioEngine {
     this.recorder = new AudioWorkletNode(this.context, 'vale-pcm-recorder', {
       numberOfInputs: 1, numberOfOutputs: 1, channelCount: channels,
       channelCountMode: 'explicit', channelInterpretation: channels === 2 ? 'discrete' : 'speakers',
+      processorOptions: { waitForWindow: Boolean(window) },
     })
     const silent = this.context.createGain()
     silent.gain.value = 0
@@ -892,7 +936,9 @@ export class AudioEngine {
     this.inputSource.connect(this.monitorGain).connect(graph?.input ?? graph?.highPass ?? this.context.destination)
 
     this.prepareRecording(trackId, project.audioSampleRate, channels, onPcmChunk)
-    this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[] }>) => {
+    this.recordingWindow = window
+    if (window) this.recordingStartFrame = window.start
+    this.recorder.port.onmessage = ({ data }: MessageEvent<{ type: string; channels?: ArrayBuffer[]; interrupted?: boolean; reason?: string }>) => {
       if (data.type === 'pcm' && data.channels?.length === channels) {
         const left = new Float32Array(data.channels[0])
         if (channels === 1) this.acceptRecordingPcm(left)
@@ -907,6 +953,7 @@ export class AudioEngine {
         }
       }
       if (data.type === 'flushed') this.resolveFlush?.()
+      if (data.type === 'window-ended') this.recordingWindow?.onEnd(Boolean(data.interrupted), data.reason)
     }
     return { inputSettings: this.recordingSettings, startFrame: this.recordingStartFrame }
   }
@@ -1012,6 +1059,7 @@ export class AudioEngine {
   async stopRecording(): Promise<CapturedRecording | undefined> {
     if (!this.context || !this.recordingTrackId) return undefined
     const capture = this.asioCapture
+    let flushError: string | undefined
     if (!capture && !this.recorder) return undefined
     if (capture) {
       capture.stopping = true
@@ -1026,13 +1074,18 @@ export class AudioEngine {
       }
     } else {
       await new Promise<void>((resolve) => {
-        this.resolveFlush = resolve
+        const timeout = window.setTimeout(() => {
+          flushError = 'A entrada de áudio deixou de responder durante o encerramento.'
+          resolve()
+        }, 1000)
+        this.resolveFlush = () => { window.clearTimeout(timeout); resolve() }
         this.recorder!.port.postMessage({ type: 'stop' })
       })
     }
     this.queueDurableChunk()
     await this.durableWrite
     try {
+      if (flushError) throw new Error(flushError)
       if (capture?.error) throw new Error(capture.error)
       const channels = this.recordingChannels
       const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length / channels, 0)
@@ -1073,6 +1126,7 @@ export class AudioEngine {
     this.recorder = undefined
     this.monitorGain = undefined
     this.recordingTrackId = undefined
+    this.recordingWindow = undefined
     this.asioCapture = undefined
     this.recordingChunks = []
     this.resolveFlush = undefined
@@ -1192,6 +1246,22 @@ export class AudioEngine {
       await this.scheduleRenderTrack(offline, project, track, graph)
     }
     return offline.startRendering()
+  }
+
+  async renderTakeLoop(project: AudioProject, start: number, end: number): Promise<AudioBuffer> {
+    if (!this.context) throw new Error('Ative o áudio antes de gravar em loop.')
+    const mix = await this.renderMix(project)
+    const rate = this.context.sampleRate
+    const frames = Math.round((end - start) * rate / project.audioSampleRate)
+    const context = new OfflineAudioContext(2, frames, rate)
+    const from = start / project.audioSampleRate
+    if (from < mix.duration) {
+      const source = context.createBufferSource()
+      source.buffer = mix
+      source.connect(context.destination)
+      source.start(0, from)
+    }
+    return context.startRendering()
   }
 
   async renderStem(project: AudioProject, trackId: string): Promise<AudioBuffer> {

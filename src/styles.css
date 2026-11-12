@@ -318,6 +318,10 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .comp-region fieldset { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; border: 0; padding: 6px 0; }
 .comp-region label { display: grid; font-size: 11px; }
 .comp-region input { width: 95px; }
+.punch-controls { margin-top: 8px; padding: 8px 12px; border: 1px solid #36516b; border-radius: 8px; background: #152838; font-size: 12px; }
+.punch-controls fieldset { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; border: 0; margin: 0; padding: 8px 0 0; }
+.punch-controls label { display: grid; gap: 3px; }
+.punch-controls input { width: 86px; }
 .toast { pointer-events: none; }
 .toast button { pointer-events: auto; }
 @media (min-width: 840px) {

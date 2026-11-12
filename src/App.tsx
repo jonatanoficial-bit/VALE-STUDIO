@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
 import type { NativeCaptureSettings } from './platform/desktop'
 import { AsioMonitorControls } from './audio/AsioMonitorControls'
@@ -12,6 +12,7 @@ import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
 import type { AudioProject, AutomationLane, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, TrackAutomation, Vst3Insert } from './domain/model'
 import { applyCompRegion, clipIsAudible } from './domain/comp'
+import { loopSlices } from './audio/loopRecording'
 import { createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
@@ -23,6 +24,7 @@ import { PWA_SERVICE_WORKER_AVAILABLE, SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
 type Toast = { tone: 'info' | 'error' | 'success'; text: string } | undefined
 type Vst3ProbeState = { status: 'checking' | 'compatible' | 'incompatible'; message: string }
+type PunchRange = { start: number; end: number; preRoll: number; passes?: number }
 
 const TRACK_COLORS = ['#1eaeff', '#a855f7', '#ff9e3d', '#f5cd36', '#1ed6b5', '#5d71ff']
 
@@ -239,7 +241,9 @@ export default function App() {
   const recordingRef = useRef(false)
   const startingPlaybackRef = useRef(false)
   const activeMidiNotesRef = useRef(new Map<number, Omit<MidiNote, 'durationBeats'>>())
-  const activeDraftRef = useRef<{ id: string; projectId: string; trackId: string; secondary?: { id: string; trackId: string } } | undefined>(undefined)
+  const activeDraftRef = useRef<{ id: string; projectId: string; trackId: string; secondary?: { id: string; trackId: string };
+    punch?: PunchRange; loop?: { framesPerPass: number; ids: string[] } } | undefined>(undefined)
+  const punchInterrupted = useRef<string | undefined>(undefined)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const archiveInputRef = useRef<HTMLInputElement>(null)
   const [projects, setProjects] = useState<AudioProject[]>([])
@@ -255,6 +259,7 @@ export default function App() {
   const [asioRecording, setAsioRecording] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
+  const [punchEnded, setPunchEnded] = useState(false)
   const [isMetronome, setIsMetronome] = useState(false)
   const [playhead, setPlayhead] = useState(0)
   const [inputPeak, setInputPeak] = useState<number>()
@@ -312,6 +317,11 @@ export default function App() {
   const activeAssetById = useMemo(() => new Map(project?.assets.map((asset) => [asset.id, asset]) ?? []), [project])
   const activeProjectId = project?.id
   const desktopRuntime = isDesktopRuntime()
+  const finishPunch = useEffectEvent(() => { void toggleRecording() })
+
+  useEffect(() => {
+    if (isRecording && punchEnded) finishPunch()
+  }, [isRecording, punchEnded])
 
   useEffect(() => {
     const dialog = trackDialog.current
@@ -846,6 +856,11 @@ export default function App() {
     if (!project) return
     if (!capabilities && !await activateAudio()) return
     if (isPlaying) {
+      if (activeDraftRef.current?.punch) {
+        const loop = activeDraftRef.current.loop
+        await toggleRecording()
+        if (loop) return
+      }
       saveAutomationPass(engineRef.current.pause(project.audioSampleRate), project)
       setIsPlaying(false)
     } else {
@@ -865,17 +880,17 @@ export default function App() {
     }
   }
 
-  async function toggleRecording(asio?: NativeCaptureSettings, dryReturn = false, twoTracks = false) {
+  async function toggleRecording(asio?: NativeCaptureSettings, dryReturn = false, twoTracks = false, punch?: PunchRange) {
     if (recordTransition.current) return
     recordTransition.current = true
     try {
-      await changeRecording(asio, dryReturn, twoTracks)
+      await changeRecording(asio, dryReturn, twoTracks, punch)
     } finally {
       recordTransition.current = false
     }
   }
 
-  async function changeRecording(asio?: NativeCaptureSettings, dryReturn = false, twoTracks = false) {
+  async function changeRecording(asio?: NativeCaptureSettings, dryReturn = false, twoTracks = false, punch?: PunchRange) {
     if (asioBusy) { setToast({ tone: 'info', text: 'Desligue o retorno ASIO antes de gravar pelo motor atual.' }); return }
     if (!project) return
     const recordingTrackId = isRecording ? activeDraftRef.current?.trackId : undefined
@@ -905,60 +920,101 @@ export default function App() {
         void projectRepository.listTakeDrafts(project.id).then(setTakeDrafts)
         return
       } finally {
+        if (activeDraft?.loop) {
+          engineRef.current.pause(project.audioSampleRate)
+          engineRef.current.updateMix(project)
+          setIsPlaying(false)
+        }
         setIsRecording(false)
         setAsioRecording(false)
+        setPunchEnded(false)
         activeDraftRef.current = undefined
       }
       if (!captured || captured.frames < 128) {
         if (activeDraft) await projectRepository.discardTakeDraft(activeDraft.id).catch(() => undefined)
         if (activeDraft?.secondary) await projectRepository.discardTakeDraft(activeDraft.secondary.id).catch(() => undefined)
-        setToast({ tone: 'error', text: 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' })
+        for (const id of activeDraft?.loop?.ids.slice(1) ?? []) await projectRepository.discardTakeDraft(id).catch(() => undefined)
+        const detail = activeDraft?.punch && punchInterrupted.current
+        setToast({ tone: 'error', text: detail ? `${detail} Nenhum take foi confirmado.` : 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' })
         return
       }
       if (!activeDraft) {
         setToast({ tone: 'error', text: 'A sessão de segurança do take foi perdida. O áudio não foi marcado como salvo.' })
         return
       }
-      const startFrame = Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
-      const targets = activeDraft.secondary ? [activeDraft, activeDraft.secondary] : [activeDraft]
+      const range = activeDraft.punch
+      const loop = activeDraft.loop
+      const compPunch = Boolean(range && !loop)
+      const interrupted = range && punchInterrupted.current
+      const startFrame = range?.start ?? Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
       const recording = captured
-      const entries = targets.map((target, channel) => {
-        const buffer = activeDraft.secondary ? engineRef.current.createBufferFromPcm(recording.buffer.getChannelData(channel), recording.sampleRate) : recording.buffer
-        const blob = activeDraft.secondary ? encodeWav(buffer, 32) : recording.blob
+      const targets = loop
+        ? loopSlices(0, recording.frames, loop.framesPerPass, loop.ids.length).filter((slice) => slice.frameCount >= 128)
+          .map((slice) => ({ id: loop.ids[slice.pass], trackId: activeDraft.trackId, slice }))
+        : (activeDraft.secondary ? [activeDraft, activeDraft.secondary] : [activeDraft]).map((target) => ({ ...target, slice: undefined }))
+      const lastFullPass = loop ? targets.reduce((last, target, index) => target.slice?.frameCount === loop.framesPerPass ? index : last, -1) : -1
+      const selectedPass = lastFullPass >= 0 ? lastFullPass : targets.length - 1
+      const entries = targets.map((target, index) => {
+        let buffer = recording.buffer
+        if (target.slice) {
+          const { offset, frameCount } = target.slice
+          buffer = new AudioBuffer({ length: frameCount, numberOfChannels: recording.channels, sampleRate: recording.sampleRate })
+          for (let channel = 0; channel < recording.channels; channel += 1) {
+            buffer.getChannelData(channel).set(recording.buffer.getChannelData(channel).subarray(offset, offset + frameCount))
+          }
+        } else if (activeDraft.secondary) buffer = engineRef.current.createBufferFromPcm(recording.buffer.getChannelData(index), recording.sampleRate)
+        const blob = buffer === recording.buffer ? recording.blob : encodeWav(buffer, 32)
         const assetId = makeId()
         const takeId = makeId()
         const asset: MediaAsset = {
-          id: assetId, name: `Take ${project.takes.filter((take) => take.trackId === target.trackId).length + 1}.wav`, mimeType: 'audio/wav',
+          id: assetId, name: `Take ${project.takes.filter((take) => take.trackId === target.trackId).length + (loop ? index : 0) + 1}.wav`, mimeType: 'audio/wav',
           sampleRate: buffer.sampleRate, channels: buffer.numberOfChannels, frames: buffer.length,
           durationFrames: Math.round(buffer.length / buffer.sampleRate * project.audioSampleRate), byteLength: blob.size,
-          peaks: activeDraft.secondary ? buildPeaks(buffer) : recording.peaks, createdAt: new Date().toISOString(),
+          peaks: buffer === recording.buffer ? recording.peaks : buildPeaks(buffer), createdAt: new Date().toISOString(),
         }
         const clip: Clip = { id: makeId(), assetId, trackId: target.trackId, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
         const take = { id: takeId, assetId, trackId: target.trackId, name: asset.name.replace('.wav', ''), startFrame, durationFrames: asset.durationFrames,
-          createdAt: asset.createdAt, calibrationFrames: project.calibrationFrames, selected: true }
+          createdAt: asset.createdAt, calibrationFrames: range ? 0 : project.calibrationFrames,
+          selected: !compPunch && !interrupted && (!loop || index === selectedPass) }
         return { draftId: target.id, asset, blob, buffer, clip, take }
       })
-      const byTrack = new Map(entries.map((entry) => [entry.clip.trackId, entry]))
-      const nextProject: AudioProject = {
+      const byTrack = new Map<string, typeof entries>()
+      for (const entry of entries) {
+        const group = byTrack.get(entry.clip.trackId) ?? []
+        group.push(entry)
+        byTrack.set(entry.clip.trackId, group)
+      }
+      const replaceSelection = !compPunch && !interrupted
+      let nextProject: AudioProject = {
         ...project,
         assets: [...project.assets, ...entries.map((entry) => entry.asset)],
         clips: [...project.clips, ...entries.map((entry) => entry.clip)],
         tracks: project.tracks.map((track) => {
-          const entry = byTrack.get(track.id)
-          return entry ? { ...track, compEnabled: false, clipIds: [...track.clipIds, entry.clip.id], takeIds: [...track.takeIds, entry.take.id] } : track
+          const group = byTrack.get(track.id)
+          return group ? { ...track, compEnabled: replaceSelection ? false : track.compEnabled,
+            clipIds: [...track.clipIds, ...group.map((entry) => entry.clip.id)], takeIds: [...track.takeIds, ...group.map((entry) => entry.take.id)] } : track
         }),
-        takes: [...project.takes.map((take) => byTrack.has(take.trackId) ? { ...take, selected: false } : take), ...entries.map((entry) => entry.take)],
+        takes: [...project.takes.map((take) => replaceSelection && byTrack.has(take.trackId) ? { ...take, selected: false } : take), ...entries.map((entry) => entry.take)],
         updatedAt: new Date().toISOString(),
       }
       try {
+        if (range && compPunch && !interrupted) {
+          const take = entries[0].take
+          nextProject = applyCompRegion(nextProject, take, 0, Math.min(take.durationFrames, range.end - range.start), range.start, makeId)
+        }
         await projectRepository.commitTakes(nextProject, entries)
+        if (loop) {
+          const saved = new Set(entries.map((entry) => entry.draftId))
+          await Promise.all(loop.ids.filter((id) => !saved.has(id)).map((id) => projectRepository.discardTakeDraft(id).catch(() => undefined)))
+        }
         entries.forEach((entry) => engineRef.current.cacheAsset(entry.asset.id, entry.buffer))
         setProject(nextProject)
-        setSelectedClipId(entries[0].clip.id)
+        setSelectedClipId(compPunch && !interrupted ? nextProject.clips.at(-1)?.id : entries.at(-1)?.clip.id)
         setTakeDrafts((drafts) => drafts.filter((draft) => !entries.some((entry) => entry.draftId === draft.id)))
         void projectRepository.listProjects().then(setProjects)
         const durabilityNotice = captured.durability.error ? ' O take foi confirmado no commit final, mas houve falha em um checkpoint intermediário.' : ''
-        setToast({ tone: 'success', text: `${entries.length === 1 ? 'Take salvo' : 'Dois takes sincronizados salvos'} após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.${durabilityNotice}` })
+        setToast(interrupted ? { tone: 'error', text: `${interrupted} O áudio disponível foi salvo em takes alternativos.` } :
+          { tone: 'success', text: `${loop ? `${entries.length} takes do loop salvos` : compPunch ? 'Punch salvo no comp' : entries.length === 1 ? 'Take salvo' : 'Dois takes sincronizados salvos'} após ${captured.frames.toLocaleString('pt-BR')} frames confirmados.${durabilityNotice}` })
       } catch (error) {
         setToast({ tone: 'error', text: `O commit final falhou; o rascunho persistido continua disponível para recuperação.${error instanceof Error ? ` ${error.message}` : ''}` })
       }
@@ -968,6 +1024,7 @@ export default function App() {
     const audio = capabilities ?? await activateAudio()
     if (!audio) return
     const draftId = makeId()
+    const loopIds = punch?.passes ? [draftId, ...Array.from({ length: punch.passes - 1 }, makeId)] : undefined
     const paired = twoTracks && asio?.backend === 'wasapi' ? pairedMonoTrack(project, recordTrack) : undefined
     const secondary = paired ? { id: makeId(), trackId: paired.id } : undefined
     try {
@@ -976,14 +1033,37 @@ export default function App() {
       if (asio && (!Number.isInteger(asio.sampleRate) || asio.sampleRate < 8000 || asio.sampleRate > 192000)) {
         throw new Error('A captura nativa exige uma taxa entre 8.000 e 192.000 Hz.')
       }
-      if (!asio && !isPlaying && !await startPlayback(project)) return
+      const loopAudio = punch?.passes ? await engineRef.current.renderTakeLoop(project, punch.start, punch.end) : undefined
+      const loop = loopAudio && loopIds ? { framesPerPass: loopAudio.length, ids: loopIds } : undefined
+      if (punch) {
+        const overlap = project.clips.some((clip) => clip.trackId === recordTrack.id && !clip.takeId && !clip.compSegment &&
+          clip.timelineStartFrame < punch.end && clip.timelineStartFrame + clip.durationFrames > punch.start)
+        if (overlap && !loop) throw new Error('O punch substitui trechos de takes. A região selecionada contém um clipe importado.')
+        if (!engineRef.current.seek(loop ? punch.start : Math.max(0, punch.start - punch.preRoll))) throw new Error('Pare o transporte antes de iniciar a gravação por intervalo.')
+        punchInterrupted.current = undefined
+        setPunchEnded(false)
+      } else if (!asio && !isPlaying && !await startPlayback(project)) return
       const channels = secondary ? 2 : recordTrack.recordChannels ?? 1
-      const start = engineRef.current.getCurrentFrame(project.audioSampleRate)
+      const start = punch?.start ?? engineRef.current.getCurrentFrame(project.audioSampleRate)
       const sampleRate = asio?.sampleRate ?? audio.sampleRate
-      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: start, sampleRate, channels: secondary ? 1 : channels })
+      await projectRepository.beginTakeDraft({ id: draftId, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: start, positionIsFinal: punch ? true : undefined, sampleRate, channels: secondary ? 1 : channels })
       if (secondary) await projectRepository.beginTakeDraft({ ...secondary, projectId: project.id, timelineStartFrame: start, sampleRate, channels: 1 })
-      activeDraftRef.current = { id: draftId, projectId: project.id, trackId: recordTrack.id, secondary }
+      for (const id of loop?.ids.slice(1) ?? []) await projectRepository.beginTakeDraft({
+        id, projectId: project.id, trackId: recordTrack.id, timelineStartFrame: start, positionIsFinal: true, sampleRate, channels,
+      })
+      activeDraftRef.current = { id: draftId, projectId: project.id, trackId: recordTrack.id, secondary, punch, loop }
+      const loopSequences = loop?.ids.map(() => 0)
       const persistChunk = async (chunk: RecordingPcmChunk) => {
+        if (loop && loopSequences) {
+          const pcm = new Float32Array(chunk.pcm)
+          const slices = loopSlices(chunk.firstFrame, chunk.frameCount, loop.framesPerPass, loop.ids.length)
+          await projectRepository.appendTakeDraftChunks(slices.map(({ pass, offset, firstFrame, frameCount }) => ({
+            ...chunk, draftId: loop.ids[pass], sequence: loopSequences[pass], firstFrame, frameCount,
+            pcm: pcm.slice(offset * channels, (offset + frameCount) * channels).buffer,
+          })))
+          for (const slice of slices) loopSequences[slice.pass] += 1
+          return
+        }
         if (secondary) {
           const pcm = new Float32Array(chunk.pcm)
           await projectRepository.appendTakeDraftChunks([draftId, secondary.id].map((id, channel) => {
@@ -998,20 +1078,28 @@ export default function App() {
       const recording = asio
         ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, channels, persistChunk,
           (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }))
-        : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, channels, persistChunk)
-      if (!asio) await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
+        : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, channels, persistChunk, punch && {
+          ...punch, onEnd: (failed, reason) => {
+            punchInterrupted.current = failed ? reason ?? 'A gravação foi interrompida.' : undefined
+            setPunchEnded(true)
+          },
+          loop: loopAudio && punch.passes ? { audio: loopAudio, passes: punch.passes } : undefined,
+        })
+      if (punch && !await startPlayback(project)) throw new Error('Não foi possível iniciar a reprodução para o punch.')
+      if (!asio && !punch) await projectRepository.updateTakeDraftStart(draftId, recording.startFrame)
       setRecordFrom(recording.startFrame)
       setRecordingPeaks([])
       setIsRecording(true)
       setAsioRecording(Boolean(asio))
       const agc = recording.inputSettings?.autoGainControl
       const bufferInfo = recording.bufferFrames ? ` · buffer de ${recording.bufferFrames} frames` : ''
-      setToast({ tone: 'info', text: asio ? `Capturando pelo ${asio.backend === 'wasapi' ? 'WASAPI Shared' : 'ASIO4ALL'} · período de ${recording.periodFrames} frames${bufferInfo}.` : agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
+      setToast({ tone: 'info', text: loop ? 'Gravando em loop sobre a mixagem preparada.' : punch ? 'Punch programado. A reprodução começou no pré-roll.' : asio ? `Capturando pelo ${asio.backend === 'wasapi' ? 'WASAPI Shared' : 'ASIO4ALL'} · período de ${recording.periodFrames} frames${bufferInfo}.` : agc ? 'Capturando: o sistema informou controle automático de ganho.' : 'Capturando PCM seco com checkpoints locais.' })
     } catch (error) {
       if (engineRef.current.isRecording) await engineRef.current.stopRecording().catch(() => undefined)
       activeDraftRef.current = undefined
       await projectRepository.discardTakeDraft(draftId).catch(() => undefined)
       if (secondary) await projectRepository.discardTakeDraft(secondary.id).catch(() => undefined)
+      for (const id of loopIds?.slice(1) ?? []) await projectRepository.discardTakeDraft(id).catch(() => undefined)
       setToast({ tone: 'error', text: error instanceof Error ? error.message : 'Não foi possível iniciar a gravação.' })
     }
   }
@@ -1034,7 +1122,7 @@ export default function App() {
         frames: recovered.pcm.length / recovered.channels, durationFrames: Math.round(buffer.duration * project.audioSampleRate), byteLength: takeBlob.size,
         peaks: buildPeaks(buffer), createdAt: new Date().toISOString(),
       }
-      const startFrame = Math.max(0, recovered.timelineStartFrame + project.calibrationFrames)
+      const startFrame = Math.max(0, recovered.timelineStartFrame + (draft.positionIsFinal ? 0 : project.calibrationFrames))
       const clip: Clip = { id: makeId(), assetId, trackId: track.id, timelineStartFrame: startFrame, sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0, takeId }
       const nextProject: AudioProject = {
         ...project,
@@ -1319,6 +1407,39 @@ export default function App() {
           <button className="button record-action" disabled={!selectedTrack} onClick={() => void toggleRecording()}>{isRecording ? '■ Salvar take' : '● Gravar'}</button>
         </div>
       </div>
+      {selectedTrack && selectedTrack.kind !== 'midi' && <details className="punch-controls">
+        <summary>Punch e gravação em loop</summary>
+        <form onSubmit={(event) => {
+          event.preventDefault()
+          if (!canEditTimeline || asioBusy || isMetronome || !selectedTrack.armed) return
+          const fields = new FormData(event.currentTarget)
+          const frame = (name: string) => Math.round(Number(fields.get(name)) * project.audioSampleRate)
+          const start = frame('start')
+          const end = frame('end')
+          const preRoll = frame('preRoll')
+          const looping = (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value') === 'loop'
+          const passes = looping ? Number(fields.get('passes')) : undefined
+          if (![start, end, preRoll].every(Number.isSafeInteger) || start < 0 || end - start < project.audioSampleRate / 50 ||
+              end > timelineFrames || preRoll < 0 || preRoll > project.audioSampleRate * 30) {
+            setToast({ tone: 'error', text: 'Selecione um intervalo de pelo menos 20 ms dentro da linha do tempo.' })
+            return
+          }
+          if (passes !== undefined && (!Number.isInteger(passes) || passes < 2 || passes > 8 || (end - start) * passes > project.audioSampleRate * 300)) {
+            setToast({ tone: 'error', text: 'Escolha de 2 a 8 passagens com até 5 minutos de gravação no total.' })
+            return
+          }
+          void toggleRecording(undefined, false, false, { start, end, preRoll, passes })
+        }}>
+          <fieldset disabled={!canEditTimeline || asioBusy || isMetronome}>
+            <label>Início (s) <input name="start" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={0} required /></label>
+            <label>Fim (s) <input name="end" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={2} required /></label>
+            <label>Pré-roll do punch (s) <input name="preRoll" type="number" min={0} max={30} step="any" defaultValue={1} required /></label>
+            <label>Passagens no loop <input name="passes" type="number" min={2} max={8} step={1} defaultValue={3} required /></label>
+            <button type="submit" className="button record-action" disabled={!selectedTrack.armed}>Gravar punch</button>
+            <button type="submit" value="loop" className="button secondary" title="Repete a mixagem do intervalo e salva um take por passagem" disabled={!selectedTrack.armed}>Gravar loop</button>
+          </fieldset>
+        </form>
+      </details>}
       {desktopRuntime && <AsioMonitorControls
         key={project.id}
         armedTrackId={selectedTrack?.armed && selectedTrack.kind !== 'midi' ? selectedTrack.id : undefined}
@@ -1449,7 +1570,7 @@ export default function App() {
               setSelectedTrackId(track.id)
               updateTrack(track.id, (current) => ({ ...current, midiNotes: [...(current.midiNotes ?? []), drawn] }))
             }} />}
-          {track.id === selectedTrack?.id && isRecording && track.kind !== 'midi' && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
+          {track.id === selectedTrack?.id && isRecording && playhead >= recordFrom && track.kind !== 'midi' && <div className="audio-clip live-wave" style={{ left: `${recordFrom / timelineFrames * 100}%`, width: `${Math.max(0, playhead - recordFrom) / timelineFrames * 100}%`, '--clip-color': track.color } as React.CSSProperties}>
             <Waveform peaks={recordingPeaks.length ? recordingPeaks : [0]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {project.clips.filter((clip) => clip.trackId === track.id && (track.compEnabled ? clipIsAudible(project, clip) : !clip.compSegment)).map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
