@@ -6,7 +6,7 @@ class PcmRecorderProcessor extends AudioWorkletProcessor {
     this.window = undefined
     this.port.onmessage = ({ data }) => {
       if (data.type === 'window' && this.waiting) {
-        this.window = { start: data.start, end: data.end, next: data.start }
+        this.window = { end: data.end, next: data.start }
         this.waiting = false
       }
       if (data.type === 'stop') {
@@ -24,7 +24,7 @@ class PcmRecorderProcessor extends AudioWorkletProcessor {
     if (!this.capturing || this.waiting) return true
 
     const frames = output?.[0]?.length ?? input?.[0]?.length ?? 128
-    const start = this.window ? Math.max(0, this.window.start - currentFrame) : 0
+    const start = this.window ? Math.max(0, this.window.next - currentFrame) : 0
     const end = this.window ? Math.min(frames, this.window.end - currentFrame) : frames
     if (this.window && end > start && (currentFrame + start !== this.window.next || !input?.length || input.some((channel) => channel.length < end))) {
       this.capturing = false

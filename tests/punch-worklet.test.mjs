@@ -33,6 +33,7 @@ test('punch recorta as bordas dos blocos e entrega os canais completos antes de 
   assert.equal(messages.length, 0)
   recorder.port.onmessage({ data: { type: 'window', start: 153, end: 273 } })
   block(128)
+  block(128)
   block(256)
   block(384)
   assert.deepEqual(messages.map((event) => event.type), ['pcm', 'pcm', 'window-ended'])

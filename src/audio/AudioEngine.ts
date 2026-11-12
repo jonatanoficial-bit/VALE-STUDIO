@@ -166,7 +166,7 @@ export class AudioEngine {
     }
     if (this.context.state !== 'running') await this.context.resume()
     if (this.context.audioWorklet && !this.workletLoaded) {
-      await this.context.audioWorklet.addModule(`${import.meta.env.BASE_URL}worklets/pcm-recorder.worklet.js?v=2`)
+      await this.context.audioWorklet.addModule(`${import.meta.env.BASE_URL}worklets/pcm-recorder.worklet.js?v=3`)
       this.workletLoaded = true
     }
     return {
