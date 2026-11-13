@@ -44,6 +44,15 @@ function formatDuration(frames: number, rate: number): string {
   return `${String(minutes).padStart(2, '0')}:${(seconds % 60).toFixed(1).padStart(4, '0')}`
 }
 
+function formatTransportTime(frames: number, rate: number): string {
+  const millis = Math.max(0, Math.floor(frames * 1000 / rate))
+  const hours = Math.floor(millis / 3_600_000)
+  const minutes = Math.floor(millis / 60_000) % 60
+  const seconds = Math.floor(millis / 1000) % 60
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':')
+    + '.' + String(millis % 1000).padStart(3, '0')
+}
+
 function dateLabel(value: string): string {
   return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(value))
 }
@@ -200,6 +209,14 @@ function TrackMeter({ value }: { value?: number }) {
   return <div className="track-meter" aria-label={value === undefined ? 'Medidor inativo' : `Nível ${Math.round(meterPercent(value))}%`}><span style={{ height: `${meterPercent(value)}%` }} /></div>
 }
 
+function PeakHold({ value, onReset }: { value?: number; onReset: () => void }) {
+  const decibels = value && value > 0 ? 20 * Math.log10(value) : -Infinity
+  return <button type="button" className={`peak-hold${decibels >= 0 ? ' clipping' : ''}`}
+    title="Zerar o pico deste canal" aria-label="Zerar pico" onClick={(event) => { event.stopPropagation(); onReset() }}>
+    <span>Pico</span> {Number.isFinite(decibels) ? `${decibels.toFixed(1)} dBFS` : '—'}
+  </button>
+}
+
 function FaderScale() {
   return <span className="fader-scale" aria-hidden="true">{[6, 0, -12, -24, -36, -48, -60].map((db) =>
     <span key={db} style={{ top: `${(6 - db) / 66 * 100}%` }}>{db > 0 ? '+' : ''}{db}</span>)}</span>
@@ -267,6 +284,7 @@ export default function App() {
   const [recordingPeaks, setRecordingPeaks] = useState<Record<string, number[]>>({})
   const [recordFrom, setRecordFrom] = useState(0)
   const [trackPeaks, setTrackPeaks] = useState<Record<string, number>>({})
+  const [heldPeaks, setHeldPeaks] = useState<{ projectId: string; levels: Record<string, number> }>()
   const [toast, setToast] = useState<Toast>()
   const [showNewProject, setShowNewProject] = useState(false)
   const [exporting, setExporting] = useState<'wav' | 'mp3' | 'stems'>()
@@ -334,6 +352,10 @@ export default function App() {
   const finishPunch = useEffectEvent(() => { void toggleRecording() })
 
   useEffect(() => {
+    if (isRecording) document.querySelector<HTMLElement>('#studio-recording:popover-open')?.hidePopover()
+  }, [isRecording])
+
+  useEffect(() => {
     if (isRecording && punchEnded) finishPunch()
   }, [isRecording, punchEnded])
 
@@ -362,7 +384,6 @@ export default function App() {
       const errors = results.flatMap((result) => result.errors)
       setVst3Plugins((current) => mergeVst3Plugins(current, plugins))
       setVst3ScanErrors(errors)
-      if (plugins.length) setToast({ tone: 'success', text: `${plugins.length} plug-ins VST3 encontrados automaticamente.` })
     }).catch(() => undefined)
   }, [desktopRuntime, vst3Directory])
 
@@ -420,10 +441,36 @@ export default function App() {
         const value = engineRef.current.getTrackMeter(track.id)?.peak
         if (value !== undefined) next[track.id] = value
       })
+      if (isRecording && draft && input) {
+        next[draft.trackId] = draft.secondary ? input.channelPeaks[0] : input.peak
+        if (draft.secondary) next[draft.secondary.trackId] = input.channelPeaks[1]
+      }
       setTrackPeaks(next)
+      if (isPlaying || isRecording) {
+        setHeldPeaks((previous) => {
+          const sameProject = previous?.projectId === project.id
+          const levels = sameProject ? previous.levels : {}
+          const increases = Object.entries(next).filter(([channel, peak]) => peak > (levels[channel] ?? 0))
+          if (sameProject && increases.length === 0) return previous
+          return { projectId: project.id, levels: { ...levels, ...Object.fromEntries(increases) } }
+        })
+      }
     }, 80)
     return () => window.clearInterval(timer)
   }, [project, isRecording, isPlaying, view])
+
+  function resetPeak(channel: string) {
+    setHeldPeaks((previous) => {
+      if (!previous || previous.projectId !== project?.id) return previous
+      const levels = { ...previous.levels }
+      delete levels[channel]
+      return { projectId: previous.projectId, levels }
+    })
+  }
+
+  function heldPeak(channel: string) {
+    return heldPeaks?.projectId === project?.id ? heldPeaks?.levels[channel] : undefined
+  }
 
   const updateProject = useCallback((change: (current: AudioProject) => AudioProject, recordHistory = true) => {
     setProject((current) => {
@@ -1412,41 +1459,73 @@ export default function App() {
   }
 
   return <main className="app-shell studio-shell">
-    <header className="studio-header"><Logo /><div className="project-name"><strong>{project.name}</strong><span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : ''}>{isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}</span></div><div className="header-actions">{updateReady && <button className="action-chip update-chip" onClick={() => void applyPendingUpdate()} disabled={isRecording} title={isRecording ? 'Finalize o take antes de atualizar' : 'Salvar e aplicar a nova versão'}>{isRecording ? 'Após take' : 'Atualizar'}</button>}<button className="action-chip" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button><button className="icon-button" disabled={isRecording || asioBusy} onClick={() => void closeProject(project)} aria-label="Voltar aos projetos">⌂</button></div></header>
-    <section className="transport"><button type="button" className="transport-button" disabled={isRecording || asioBusy} onClick={() => { if (recordTransition.current) return; saveAutomationPass(engineRef.current.stop(), project); setIsPlaying(false); setPlayhead(0) }} aria-label="Voltar ao início">|◀</button><button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button><button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()} aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button><div className="clock"><b>{formatDuration(playhead, project.audioSampleRate)}</b><small>{project.bpm} BPM · {project.timeSignature}</small></div>{desktopRuntime && <label className="transport-buffer">Buffer VST3
-      <select aria-label="Buffer VST3 em frames" value={bufferFrames} disabled={isPlaying || isRecording || isStarting} onChange={(event) => {
-        const value = Number(event.target.value) as NonNullable<AudioProject['vstBufferFrames']>
-        updateProject((current) => ({ ...current, vstBufferFrames: value }))
-      }}>
-        {([256, 512, 1024, 2048, 4096] as const).map((frames) => <option key={frames} value={frames}>{frames} frames</option>)}
-      </select>
-      <small title="Atraso estimado de um insert, sem contar o dispositivo">~{Math.round(bufferFrames * 3000 / (capabilities?.sampleRate ?? project.audioSampleRate))} ms por insert</small>
-    </label>}<button type="button" className={`metro-button ${isMetronome ? 'active' : ''}`} onClick={toggleMetronome} aria-pressed={isMetronome}>♩<span>METRO</span></button></section>
-
-    <section className="session-meta"><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.max(40, current.bpm - 1) }))}>−</button><strong>{project.bpm} BPM</strong><button onClick={() => updateProject((current) => ({ ...current, bpm: Math.min(240, current.bpm + 1) }))}>＋</button><span className="meta-divider" /><span>{project.timeSignature}</span><span className={`sync-badge ${project.calibrationFrames ? 'calibrated' : ''}`}>{project.calibrationFrames ? `Ajuste ${project.calibrationFrames} fr` : 'Sem calibração'}</span></section>
-
-    {view === 'tracks' && <section className="track-area">
-      <div className={`recording-desk ${isRecording ? 'recording-desk-active' : ''}`}>
-        <div className="recording-desk-title">
-          <small>{isRecording ? '● GRAVANDO' : 'GRAVAÇÃO MULTIPISTA'}</small>
-          <h2>{selectedTrack?.name ?? 'Selecione uma pista'}</h2>
-          <span>{selectedTrack?.kind === 'midi' ? 'Instrumento MIDI' : 'Entrada de áudio'} · {selectedTrack?.armed ? 'Pista armada' : 'Pista desarmada'}</span>
+    <header className="studio-header">
+      <div className="studio-transport-row">
+        <div className="studio-project">
+          <button type="button" className="transport-button project-home" aria-label="Voltar aos projetos" title="Voltar aos projetos"
+            disabled={isRecording || asioBusy} onClick={() => void closeProject(project)}>V</button>
+          <div className="project-name">
+            <strong title={project.name}>{project.name}</strong>
+            <span className={isRecording ? 'recording' : takeDrafts.length ? 'recovery-status' : undefined}>
+              {isRecording ? 'CAPTURANDO' : takeDrafts.length ? 'RECUPERAÇÃO PENDENTE' : 'SALVO LOCAL'}
+            </span>
+          </div>
         </div>
-        {selectedTrack?.kind !== 'midi' && <div className="recording-input"><span>Nível de entrada</span><meter min={0} max={1} value={Math.min(1, inputPeak ?? 0)} aria-label="Nível de entrada" /></div>}
-        <div className="recording-controls">
-          {selectedTrack && selectedTrack.kind !== 'midi' && <AudioInputSelect value={selectedTrack.inputDeviceId} disabled={isRecording || asioBusy}
-            onChange={(inputDeviceId) => updateTrack(selectedTrack.id, (track) => ({ ...track, inputDeviceId }))} />}
-          {selectedTrack && selectedTrack.kind !== 'midi' && <label>Formato de entrada <select value={selectedTrack.recordChannels ?? 1} disabled={isRecording || asioBusy} onChange={(event) => {
-            const recordChannels = event.target.value === '2' ? 2 : 1
-            updateTrack(selectedTrack.id, (current) => ({ ...current, recordChannels }))
-          }}>
-            <option value={1}>Mono</option><option value={2}>Estéreo</option>
-          </select></label>}
-          {selectedTrack?.kind === 'midi' && <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>}
-          {selectedTrack && <button className="button secondary" disabled={isRecording} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
-          <button className="button record-action" disabled={!selectedTrack} onClick={() => void toggleRecording()}>{isRecording ? '■ Salvar take' : '● Gravar'}</button>
+        <section className="transport" aria-label="Transporte">
+          <div className="transport-buttons">
+            <button type="button" className="transport-button" disabled={isRecording || asioBusy} title="Voltar ao início" aria-label="Voltar ao início"
+              onClick={() => { if (recordTransition.current) return; saveAutomationPass(engineRef.current.stop(), project); setIsPlaying(false); setPlayhead(0) }}>⏮</button>
+            <button type="button" className="transport-button" disabled={!canEditTimeline || asioBusy} title="Retroceder 5 segundos" aria-label="Retroceder 5 segundos"
+              onClick={() => seekTimeline(playhead - project.audioSampleRate * 5)}>⏪</button>
+            <button type="button" className={`transport-button play ${isPlaying ? 'active' : ''}`} onClick={togglePlayback}
+              disabled={asioBusy || (isRecording && asioRecording)} title={isPlaying ? 'Pausar' : 'Tocar'} aria-label={isPlaying ? 'Pausar' : 'Tocar'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
+            <button type="button" className="transport-button" disabled={!canEditTimeline || asioBusy} title="Avançar 5 segundos" aria-label="Avançar 5 segundos"
+              onClick={() => seekTimeline(playhead + project.audioSampleRate * 5)}>⏩</button>
+            <button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()}
+              disabled={asioBusy || !selectedTrack} title={isRecording ? 'Salvar take' : 'Gravar na pista armada'}
+              aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button>
+          </div>
+          <div className="clock" aria-label="Posição do transporte"><b>{formatTransportTime(playhead, project.audioSampleRate)}</b></div>
+        </section>
+      </div>
+      <div className="studio-nav-row">
+        <nav className="studio-tabs" aria-label="Navegação do estúdio">
+          {([{ id: 'tracks', label: 'Pistas' }, { id: 'mixer', label: 'Mixer' }, { id: 'effects', label: 'Efeitos' }, { id: 'takes', label: 'Takes' }, { id: 'project', label: 'Projeto' }] as const).map((item) =>
+            <button key={item.id} type="button" aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}>{item.label}</button>)}
+        </nav>
+        <div className="studio-menu-buttons">
+          <button type="button" popoverTarget="studio-recording">Gravação <span aria-hidden="true">▾</span></button>
+          <button type="button" popoverTarget="studio-settings">Configurações <span aria-hidden="true">▾</span></button>
         </div>
       </div>
+    </header>
+    <section className="studio-popover" id="studio-recording" popover="auto" aria-label="Gravação">
+      <header className="studio-popover-header">
+        <h2>Gravação</h2>
+        <button type="button" className="icon-button" popoverTarget="studio-recording" popoverTargetAction="hide" aria-label="Fechar gravação">×</button>
+      </header>
+      <details className="punch-controls" open>
+        <summary>Entrada da pista</summary>
+        <div className="recording-desk">
+          <div className="recording-desk-title">
+            <h3>{selectedTrack?.name ?? 'Selecione uma pista'}</h3>
+            <span>{selectedTrack?.armed ? 'Pista armada' : 'Pista desarmada'}</span>
+          </div>
+          {selectedTrack?.kind !== 'midi' && <div className="recording-input"><span>Nível de entrada</span><meter min={0} max={1} value={Math.min(1, inputPeak ?? 0)} aria-label="Nível de entrada" /></div>}
+          <div className="recording-controls">
+            {selectedTrack && selectedTrack.kind !== 'midi' && <AudioInputSelect value={selectedTrack.inputDeviceId} disabled={isRecording || asioBusy}
+              onChange={(inputDeviceId) => updateTrack(selectedTrack.id, (track) => ({ ...track, inputDeviceId }))} />}
+            {selectedTrack && selectedTrack.kind !== 'midi' && <label>Formato de entrada <select value={selectedTrack.recordChannels ?? 1} disabled={isRecording || asioBusy} onChange={(event) => {
+              const recordChannels = event.target.value === '2' ? 2 : 1
+              updateTrack(selectedTrack.id, (current) => ({ ...current, recordChannels }))
+            }}>
+              <option value={1}>Mono</option><option value={2}>Estéreo</option>
+            </select></label>}
+            {selectedTrack?.kind === 'midi' && <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>}
+            {selectedTrack && <button className="button secondary" disabled={isRecording} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
+          </div>
+        </div>
+      </details>
       {selectedTrack && selectedTrack.kind !== 'midi' && <details className="punch-controls">
         <summary>Punch e gravação em loop</summary>
         <form onSubmit={(event) => {
@@ -1501,6 +1580,35 @@ export default function App() {
         }}
         setAudioBusy={setAsioBusy}
       />}
+    </section>
+    <section className="studio-popover" id="studio-settings" popover="auto" aria-label="Configurações">
+      <header className="studio-popover-header">
+        <h2>Configurações</h2>
+        <button type="button" className="icon-button" popoverTarget="studio-settings" popoverTargetAction="hide" aria-label="Fechar configurações">×</button>
+      </header>
+      <div className="studio-settings-grid">
+        <button className="button secondary" onClick={() => void activateAudio()}>{capabilities ? `${capabilities.sampleRate / 1000} kHz` : 'Ativar áudio'}</button>
+        <button type="button" className="button secondary" onClick={toggleMetronome} aria-pressed={isMetronome}>Metrônomo</button>
+        <label>Tempo (BPM)
+          <input type="number" min={40} max={240} value={project.bpm} disabled={!canEditTimeline} onChange={(event) => {
+            const bpm = event.target.valueAsNumber
+            if (Number.isFinite(bpm)) updateProject((current) => ({ ...current, bpm: Math.max(40, Math.min(240, bpm)) }))
+          }} />
+        </label>
+{desktopRuntime && <label className="transport-buffer">Buffer VST3
+      <select aria-label="Buffer VST3 em frames" value={bufferFrames} disabled={isPlaying || isRecording || isStarting} onChange={(event) => {
+        const value = Number(event.target.value) as NonNullable<AudioProject['vstBufferFrames']>
+        updateProject((current) => ({ ...current, vstBufferFrames: value }))
+      }}>
+        {([256, 512, 1024, 2048, 4096] as const).map((frames) => <option key={frames} value={frames}>{frames} frames</option>)}
+      </select>
+      <small title="Atraso estimado de um insert, sem contar o dispositivo">~{Math.round(bufferFrames * 3000 / (capabilities?.sampleRate ?? project.audioSampleRate))} ms por insert</small>
+    </label>}
+        {updateReady && <button className="button secondary" onClick={() => void applyPendingUpdate()} disabled={isRecording}>Salvar e atualizar</button>}
+      </div>
+    </section>
+
+    {view === 'tracks' && <section className="track-area">
       <div className="timeline-tools">
         <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
         <div className="timeline-zoom">
@@ -1666,6 +1774,7 @@ export default function App() {
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? '＋ Insert VST3'}</button>
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'sends')}>Sends</button>
     </div><div className="strip-settings"><AutomationModeSelect mode={track.automation?.mode} disabled={!canEditTimeline} label="Automação" onChange={(mode) => updateTrack(track.id, (item) => ({ ...item, automation: { ...item.automation, mode } }))} /><label>Cor da pista<input className="track-color-input" type="color" value={track.color} onChange={(event) => updateTrack(track.id, (current) => ({ ...current, color: event.target.value }))} /></label></div><div className="fader-bank"><FaderScale /><MixAutomationControl track={track} lane="gainDb" playing={isPlaying} value={mixAutomationValue(track, 'gainDb')} onValue={(value) => moveMixControl(track, 'gainDb', value)} onRelease={() => releaseMixControl(track, 'gainDb')} /><TrackMeter value={trackPeaks[track.id]} /></div><output>{dbLabel(mixAutomationValue(track, 'gainDb'))}</output><label>Pan<MixAutomationControl track={track} lane="pan" playing={isPlaying} value={mixAutomationValue(track, 'pan')} onValue={(value) => moveMixControl(track, 'pan', value)} onRelease={() => releaseMixControl(track, 'pan')} /></label>
+        <PeakHold value={heldPeak(track.id)} onReset={() => resetPeak(track.id)} />
         <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
           <small>SENDS</small>
           {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'} value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => updateTrack(track.id, (current) => ({ ...current, sends: { reverb: 0, delay: 0, ...current.sends, [bus]: value / 100 } }))} />)}
@@ -1687,6 +1796,7 @@ export default function App() {
             <TrackMeter value={trackPeaks[bus.id]} />
           </div>
           <output>{dbLabel(bus.gainDb)}</output>
+          <PeakHold value={heldPeak(bus.id)} onReset={() => resetPeak(bus.id)} />
           <Toggle pressed={bus.mute} label="M" onClick={() => updateAux(bus.id, (item) => ({ ...item, mute: !item.mute }))} />
           <button className="button secondary" type="button" disabled={!canEditTimeline} onClick={() => removeAux(bus.id)}>Remover auxiliar</button>
         </article>)}
@@ -1698,6 +1808,7 @@ export default function App() {
             updateProject((current) => ({ ...current, masterGainDb: value }), false)
           }} /><TrackMeter value={trackPeaks.master} /></div>
           <output>{dbLabel(project.masterGainDb ?? 0)}</output>
+          <PeakHold value={heldPeak('master')} onReset={() => resetPeak('master')} />
           <button className="button secondary" type="button" disabled={!canEditTimeline || (project.auxBuses?.length ?? 0) >= 32} onClick={() => {
             const id = makeId()
             updateProject((current) => ({ ...current, auxBuses: [...(current.auxBuses ?? []), { id, name: `Auxiliar ${(current.auxBuses?.length ?? 0) + 1}`, gainDb: 0, mute: false }] }))
@@ -1759,7 +1870,7 @@ export default function App() {
     {view === 'project' && <section className="midi-panel"><div><span className="eyebrow">MIDI EXTERNO</span><h3>{selectedTrack?.kind === 'midi' ? `Entrada para ${selectedTrack.name}` : 'Selecione uma pista MIDI'}</h3><p>Conecte um teclado/controlador. As notas podem ser pré-ouvidas pelo sintetizador local e gravadas na pista MIDI armada. No Desktop, coloque um instrumento VST3 no primeiro insert da pista MIDI e inicie a reprodução.</p></div><div className="midi-controls"><select aria-label="Entrada MIDI" value={midiInputId ?? ''} onChange={(event) => setMidiInputId(event.target.value || undefined)}><option value="">{midiDevices.length ? 'Escolha a entrada MIDI' : 'Nenhuma entrada detectada ainda'}</option>{midiDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select><button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'Atualizar MIDI' : 'Conectar MIDI'}</button><small>{midiReady ? 'Entrada pronta. Para gravar, selecione e arme uma pista MIDI, depois use REC.' : 'O dispositivo só é acessado depois do seu toque em Conectar MIDI.'}</small></div></section>}
 
     {view === 'project' && <section className={`desktop-vst3-panel ${desktopRuntime ? 'desktop-ready' : ''}`}><div><span className="eyebrow">VST3 DESKTOP</span><h3>{desktopRuntime ? 'Catálogo de plug-ins VST3' : 'Plug-ins VST3 exigem o app Desktop'}</h3><p>{desktopRuntime ? 'Ao abrir, o app procura VST3 nas pastas padrão do Windows. Escolha uma pasta sua para acrescentar outros plug-ins; a inspeção acontece em processo nativo separado, com prazo de segurança.' : 'No navegador, continue usando os efeitos nativos. O suporte VST3 aparece apenas no instalador Vale Studio para Windows.'}</p></div><div className="vst3-actions"><button className="button secondary" onClick={() => void chooseAndScanVst3Directory()} disabled={isScanningVst3}>{isScanningVst3 ? 'Verificando…' : desktopRuntime ? 'Escolher pasta VST3' : 'Como usar no Desktop'}</button>{desktopRuntime && vst3Directory && <button className="link-button" onClick={() => void scanVst3Plugins(vst3Directory)} disabled={isScanningVst3}>Verificar novamente</button>}</div>{vst3Directory && <small className="vst3-directory">Pasta escolhida: {vst3Directory}</small>}{vst3Plugins.length > 0 && <div className="vst3-plugin-list">{vst3Plugins.map((plugin) => <article key={`${plugin.bundlePath}:${plugin.classId}`}><span>{plugin.kind === 'instrument' ? 'VST3 MIDI' : 'VST3 FX'}</span><div><strong>{plugin.name}</strong><small>{plugin.vendor || 'Fabricante não informado'} · {plugin.version || 'versão não informada'}</small></div><code>{plugin.classId}</code></article>)}</div>}{vst3ScanErrors.length > 0 && <details className="vst3-errors"><summary>{vst3ScanErrors.length} item{vst3ScanErrors.length === 1 ? '' : 's'} não pôde{vst3ScanErrors.length === 1 ? '' : 'ram'} ser inspecionado{vst3ScanErrors.length === 1 ? '' : 's'}</summary><ul>{vst3ScanErrors.slice(0, 8).map((error) => <li key={error}>{error}</li>)}</ul></details>}</section>}
-    <nav className="bottom-nav" aria-label="Navegação do estúdio">{([{ id: 'tracks', label: 'Pistas', icon: '≋' }, { id: 'mixer', label: 'Mixer', icon: '▥' }, { id: 'effects', label: 'Efeitos', icon: '◌' }, { id: 'takes', label: 'Takes', icon: '◫' }, { id: 'project', label: 'Projeto', icon: '◇' }] as const).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</nav>
+
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
     <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
     {toast && <div className={`toast ${toast.tone}`}>{toast.text}<button onClick={() => setToast(undefined)} aria-label="Fechar aviso">×</button></div>}
