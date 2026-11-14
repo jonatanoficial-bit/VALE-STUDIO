@@ -8,6 +8,24 @@ function supportedPeriods(device?: WasapiDevice): number[] {
     .sort((a, b) => a - b)
 }
 
+const SETTINGS_KEY = 'vale-studio:wasapi-settings'
+const INITIAL_SETTINGS = { deviceId: '', outputId: '', frames: 0, outputFrames: 0, input: 0, monitor: false }
+
+function loadSettings(): typeof INITIAL_SETTINGS {
+  try {
+    const { deviceId, outputId, frames, outputFrames, input, monitor } = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')
+    const natural = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
+    return {
+      deviceId: typeof deviceId === 'string' ? deviceId : '',
+      outputId: typeof outputId === 'string' ? outputId : '',
+      frames: natural(frames), outputFrames: natural(outputFrames), input: natural(input),
+      monitor: monitor === true,
+    }
+  } catch {
+    return INITIAL_SETTINGS
+  }
+}
+
 export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, stats, onRecord, prepareMix, setAudioBusy }: {
   armed: boolean
   blocked: boolean
@@ -19,19 +37,25 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
   setAudioBusy: (busy: boolean) => void
 }) {
   const [devices, setDevices] = useState<WasapiDevice[]>([])
-  const [deviceId, setDeviceId] = useState('')
-  const [frames, setFrames] = useState(0)
-  const [input, setInput] = useState(0)
-  const [outputId, setOutputId] = useState('')
-  const [outputFrames, setOutputFrames] = useState(0)
-  const [monitor, setMonitor] = useState(false)
+  const [settings, setSettings] = useState(loadSettings)
   const [playing, setPlaying] = useState(false)
   const [busy, setBusy] = useState<'devices' | 'record'>()
   const [status, setStatus] = useState('')
-  const device = devices.find((item) => item.id === deviceId)
-  const output = devices.find((item) => item.id === outputId)
+  const inputs = devices.filter((item) => item.flow === 'input')
+  const outputs = devices.filter((item) => item.flow === 'output')
+  const device = settings.deviceId ? inputs.find((item) => item.id === settings.deviceId) : inputs[0]
+  const output = outputs.find((item) => item.id === settings.outputId)
+  const frames = supportedPeriods(device).includes(settings.frames) ? settings.frames : 0
+  const outputFrames = supportedPeriods(output).includes(settings.outputFrames) ? settings.outputFrames : 0
+  const input = device && settings.input <= device.channels - channels ? settings.input : 0
   const canMonitor = Boolean(output && device && output.sampleRate === device.sampleRate)
   const run = useRef<AbortController | undefined>(undefined)
+
+  function updateSettings(changes: Partial<typeof INITIAL_SETTINGS>) {
+    const next = { ...settings, ...changes }
+    setSettings(next)
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)) } catch { /* Settings still apply in this session. */ }
+  }
 
   useEffect(() => () => {
     if (!run.current) return
@@ -45,13 +69,7 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
     try {
       const found = (await listWasapiDevices()).filter((item) => item.sampleRate > 0 && item.standard > 0)
       const inputs = found.filter((item) => item.flow === 'input')
-      const outputs = found.filter((item) => item.flow === 'output')
       setDevices(found)
-      setDeviceId(inputs.find((item) => item.id === deviceId)?.id ?? inputs[0]?.id ?? '')
-      setOutputId(outputs.find((item) => item.id === outputId)?.id ?? '')
-      setFrames(0)
-      setOutputFrames(0)
-      setInput(0)
       if (!inputs.length) setStatus('Nenhuma entrada WASAPI ativa respondeu.')
     } catch (error) {
       setStatus(String(error))
@@ -107,15 +125,15 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
   }
 
   async function record(twoTracks: boolean) {
-    if (!device) return
+    if (!device || (settings.outputId && !output)) return
     setBusy('record')
     try {
       await onRecord({
         backend: 'wasapi', frames, sampleRate: device.sampleRate,
-        input: twoTracks || input <= device.channels - channels ? input : 0,
+        input,
         output: 0, inputDeviceId: device.id,
         playback: output ? { device: output, period: outputFrames } : undefined,
-      }, twoTracks, canMonitor && monitor)
+      }, twoTracks, canMonitor && settings.monitor)
     } finally {
       setBusy(undefined)
     }
@@ -125,42 +143,42 @@ export function WasapiCaptureControls({ armed, blocked, channels, otherTrack, st
     <summary>Áudio nativo · WASAPI Shared</summary>
     <fieldset disabled={blocked || Boolean(busy)}>
       <button type="button" className="button secondary" onClick={() => void refresh()}>{busy === 'devices' ? 'Consultando…' : 'Listar dispositivos WASAPI'}</button>
+      {inputs.length > 0 && <label>Dispositivo WASAPI <select value={device?.id ?? ''} onChange={(event) =>
+        updateSettings({ deviceId: event.target.value, frames: 0, input: 0, monitor: false })}>
+        {!device && <option value="" disabled>Entrada salva indisponível</option>}
+        {inputs.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>}
       {device && <>
-        <label>Dispositivo WASAPI <select value={deviceId} onChange={(event) => {
-          setDeviceId(event.target.value)
-          setFrames(0)
-          setInput(0)
-        }}>
-          {devices.filter((item) => item.flow === 'input').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select></label>
-        <label>Período WASAPI <select value={frames} onChange={(event) => setFrames(Number(event.target.value))}>
+        <label>Período WASAPI <select value={frames} onChange={(event) =>
+          updateSettings({ deviceId: device.id, frames: Number(event.target.value) })}>
           <option value={0}>Automático · {device.standard} frames</option>
           {supportedPeriods(device).map((period) => <option key={period} value={period}>{period} frames</option>)}
         </select></label>
-        <label>Canal inicial <select value={input < device.channels - channels + 1 ? input : 0} onChange={(event) => setInput(Number(event.target.value))}>
+        <label>Canal inicial <select value={input} onChange={(event) =>
+          updateSettings({ deviceId: device.id, input: Number(event.target.value) })}>
           {Array.from({ length: Math.max(0, device.channels - channels + 1) }, (_, index) =>
             <option key={index} value={index}>{channels === 2 ? `${index + 1} + ${index + 2}` : index + 1}</option>)}
         </select></label>
-        <button type="button" className="button record-action" disabled={!armed || device.channels < channels}
+        <button type="button" className="button record-action" disabled={!armed || device.channels < channels || Boolean(settings.outputId && !output)}
           onClick={() => void record(false)}>{output ? 'Gravar com a base via WASAPI' : 'Gravar via WASAPI'}</button>
-        {otherTrack && <button type="button" className="button secondary" disabled={!armed || input + 2 > device.channels}
+        {otherTrack && <button type="button" className="button secondary" disabled={!armed || input + 2 > device.channels || Boolean(settings.outputId && !output)}
           title={`Canal ${input + 1} na pista selecionada e canal ${input + 2} em ${otherTrack}`}
           onClick={() => void record(true)}>Gravar duas pistas mono</button>}
         <output>{device.sampleRate.toLocaleString('pt-BR')} Hz · {device.channels} canais disponíveis</output>
       </>}
-      {devices.some((item) => item.flow === 'output') && <label>Saída WASAPI <select value={outputId} onChange={(event) => {
-        setOutputId(event.target.value); setOutputFrames(0); setMonitor(false)
-      }}>
-        <option value="">Escolha a saída</option>
-        {devices.filter((item) => item.flow === 'output').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+      {(outputs.length > 0 || settings.outputId) && <label>Saída WASAPI <select value={settings.outputId} onChange={(event) =>
+        updateSettings({ outputId: event.target.value, outputFrames: 0, monitor: false })}>
+        <option value="">Sem saída WASAPI</option>
+        {settings.outputId && !output && <option value={settings.outputId} disabled>Saída salva indisponível</option>}
+        {outputs.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select></label>}
       {output && <>
-        <label>Período de saída <select value={outputFrames} onChange={(event) => setOutputFrames(Number(event.target.value))}>
+        <label>Período de saída <select value={outputFrames} onChange={(event) => updateSettings({ outputFrames: Number(event.target.value) })}>
           <option value={0}>Automático · {output.standard} frames</option>
           {supportedPeriods(output).map((period) => <option key={period} value={period}>{period} frames</option>)}
         </select></label>
-        <label><input type="checkbox" checked={canMonitor && monitor} disabled={!canMonitor}
-          onChange={(event) => setMonitor(event.target.checked)} /> Ouvir a entrada durante a gravação</label>
+        <label><input type="checkbox" checked={canMonitor && settings.monitor} disabled={!canMonitor}
+          onChange={(event) => updateSettings({ deviceId: device?.id ?? '', monitor: event.target.checked })} /> Ouvir a entrada durante a gravação</label>
         {device && !canMonitor && <output>O retorno requer entrada e saída na mesma taxa.</output>}
         <button className="button secondary" type="button" onClick={() => void playMix(output)}>Reproduzir mixagem via WASAPI</button>
       </>}

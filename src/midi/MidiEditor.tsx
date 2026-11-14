@@ -4,6 +4,7 @@ import type { MidiNote } from '../domain/model'
 
 const PITCH_NAMES = ['Dó', 'Dó♯', 'Ré', 'Ré♯', 'Mi', 'Fá', 'Fá♯', 'Sol', 'Sol♯', 'Lá', 'Lá♯', 'Si']
 const TICKS_PER_BEAT = 960
+const QUANTIZE_STEPS = [1, 0.5, 0.25, 0.125] as const
 
 type Props = {
   notes: MidiNote[]
@@ -27,9 +28,33 @@ function NoteFields({ note }: { note?: MidiNote }) {
 
 export function MidiEditor({ notes, cursorBeat, disabled, onChange }: Props) {
   const [selectedId, setSelectedId] = useState('')
+  const [division, setDivision] = useState<number>(0.25)
+  const [scope, setScope] = useState<'track' | 'note'>('track')
   const ordered = [...notes].sort((a, b) => a.startBeat - b.startBeat || a.note - b.note)
   const selected = ordered.find((note) => note.id === selectedId)
   const cursorNote = { id: '', note: 60, startBeat: cursorBeat, durationBeats: 1, velocity: 100 }
+
+  function editNotes(transform: (note: MidiNote) => MidiNote) {
+    if (disabled) return
+    const next = notes.map((note) => scope === 'track' || note.id === selected?.id ? transform(note) : note)
+    if (next.some((note, index) => note !== notes[index])) onChange(next)
+  }
+
+  function quantize() {
+    editNotes((note) => {
+      const startBeat = Math.round(note.startBeat / division) * division
+      return startBeat === note.startBeat ? note : { ...note, startBeat }
+    })
+  }
+
+  function transpose(semitones: number) {
+    editNotes((note) => {
+      const pitch = note.note + semitones
+      return { ...note, note: pitch }
+    })
+  }
+
+  const targets = scope === 'track' ? notes : selected ? [selected] : []
 
   function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -70,5 +95,20 @@ export function MidiEditor({ notes, cursorBeat, disabled, onChange }: Props) {
         }}>Excluir nota</button>}
       </fieldset>
     </form>
+    <fieldset disabled={disabled}>
+      <legend>Edição de notas</legend>
+      <label>Aplicar a <select value={scope} onChange={(event) => setScope(event.target.value === 'note' ? 'note' : 'track')}>
+        <option value="track">Pista inteira</option>
+        <option value="note">Nota selecionada</option>
+      </select></label>
+      <label>Grade MIDI <select value={division} onChange={(event) => setDivision(Number(event.target.value))}>
+        {QUANTIZE_STEPS.map((step) => <option key={step} value={step}>1/{4 / step}</option>)}
+      </select></label>
+      <button className="button secondary" type="button" disabled={!targets.length} onClick={quantize}>Quantizar início</button>
+      <button className="button secondary" type="button" disabled={!targets.length || targets.some((note) => note.note === 0)}
+        onClick={() => transpose(-1)}>−1 semitom</button>
+      <button className="button secondary" type="button" disabled={!targets.length || targets.some((note) => note.note === 127)}
+        onClick={() => transpose(1)}>+1 semitom</button>
+    </fieldset>
   </section>
 }
