@@ -22,7 +22,7 @@ class ValeDynamics extends AudioWorkletProcessor {
   process(inputs, outputs, params) {
     const input = inputs[0]
     const output = outputs[0]
-    if (!output.length || !input.length) return true
+    if (!output.length) return true
     const enabled = params.enabled[0] >= 0.5
     if (!enabled) {
       for (let channel = 0; channel < output.length; channel++) {

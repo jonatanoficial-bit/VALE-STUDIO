@@ -320,9 +320,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .timeline-range label { display: grid; gap: 4px; }
 .timeline-range input { width: 118px; }
 .timeline-range-overlay { position: absolute; inset-block: 0; background: #27c3ff22; border-inline: 1px solid #27c3ff; }
-.master-limiter { width: 100%; font-size: 11px; }
-.master-limiter summary { cursor: pointer; padding-block: 5px; }
-.master-limiter .range-control input { max-width: 100%; }
+.routing-dialog.master-limiter { width: min(440px, calc(100vw - 28px)); }
 .timeline-grid .audio-clip small { top: 2px; color: #071925; font-weight: 700; }
 .timeline-grid .audio-clip polygon { fill: color-mix(in srgb, var(--clip-color) 55%, #0a1c30); }
 .timeline-grid .midi-roll { border-radius: 0; background: repeating-linear-gradient(0deg, #bbc4ce66 0 8px, #54677e38 8px 9px); }
@@ -371,6 +369,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .mixer-strip-scroll .channel-strip > .channel-sends { grid-row: 9; padding: 4px 0; width: 100%; }
   .mixer-strip-scroll .channel-strip > .strip-toggles { grid-row: 10; }
   .mixer-strip-scroll .aux-strip > .tiny-toggle { grid-row: 10; }
+  .mixer-strip-scroll .master-strip > .limiter-open { grid-row: 8; }
   .mixer-strip-scroll :is(.aux-strip, .master-strip) > .button { grid-row: 9; }
   .mixer-routing .button { min-height: 26px; }
 }

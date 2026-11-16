@@ -351,6 +351,7 @@ export default function App() {
   const navigatorDialog = useRef<HTMLDialogElement>(null)
   const timelineViewport = useRef<HTMLDivElement>(null)
   const renderTrackDialog = useRef<HTMLDialogElement>(null)
+  const limiterDialog = useRef<HTMLDialogElement>(null)
   const newTrackDialog = useRef<HTMLDialogElement>(null)
   const firstFadeInput = useRef<HTMLInputElement>(null)
   const [fadeFocusRequest, setFadeFocusRequest] = useState(0)
@@ -2095,8 +2096,9 @@ export default function App() {
           }} /><TrackMeter value={trackPeaks.master} /></div>
           <output>{dbLabel(project.masterGainDb ?? 0)}</output>
           <PeakHold value={heldPeak('master')} onReset={() => resetPeak('master')} />
-          <MasterLimiter settings={project.masterLimiter ?? DEFAULT_LIMITER} toggleDisabled={!canEditTimeline || asioBusy}
-            onChange={(masterLimiter) => updateProject((current) => ({ ...current, masterLimiter }))} />
+          <button type="button" className="tiny-toggle limiter-open" aria-haspopup="dialog" onClick={() => limiterDialog.current?.showModal()}>
+            Limiter · {project.masterLimiter?.enabled ? 'Ativo' : 'Bypass'}
+          </button>
           <button className="button secondary" type="button" disabled={!canEditTimeline || (project.auxBuses?.length ?? 0) >= 32} onClick={() => {
             const id = makeId()
             updateProject((current) => ({ ...current, auxBuses: [...(current.auxBuses ?? []), { id, name: `Auxiliar ${(current.auxBuses?.length ?? 0) + 1}`, gainDb: 0, mute: false }] }))
@@ -2147,6 +2149,11 @@ export default function App() {
         <button type="button" className="button secondary" disabled={!project.tracks.some((track) => !track.inactive && track.kind === 'midi' && track.midiNotes?.length)}
           onClick={() => exportMidi(project)}>Exportar MIDI</button>
       </div>
+    </dialog>
+    <dialog ref={limiterDialog} className="routing-dialog master-limiter" aria-labelledby="master-limiter-title">
+      <header><h2 id="master-limiter-title">Limiter master</h2><form method="dialog"><button className="icon-button" aria-label="Fechar limiter">×</button></form></header>
+      <MasterLimiter settings={project.masterLimiter ?? DEFAULT_LIMITER} toggleDisabled={!canEditTimeline || asioBusy}
+        onChange={(masterLimiter) => updateProject((current) => ({ ...current, masterLimiter }))} />
     </dialog>
     <dialog ref={renderTrackDialog} className="routing-dialog" aria-labelledby="render-track-title" onCancel={(event) => event.preventDefault()}>
       <h2 id="render-track-title">Processando áudio</h2>
@@ -2211,13 +2218,12 @@ function TrackGate({ settings, toggleDisabled, onChange }: { settings: GateSetti
 }
 
 function MasterLimiter({ settings, toggleDisabled, onChange }: { settings: LimiterSettings; toggleDisabled: boolean; onChange: (settings: LimiterSettings) => void }) {
-  return <details className="master-limiter">
-    <summary>Limiter · {settings.enabled ? 'Ativo' : 'Bypass'}</summary>
+  return <>
     <label><input type="checkbox" aria-label="Ativar limiter master" checked={settings.enabled} disabled={toggleDisabled}
       onChange={(event) => onChange({ ...settings, enabled: event.target.checked })} /> Ativar</label>
     <RangeControl label="Teto do master" value={settings.ceilingDb} min={-12} max={0} step={0.1} suffix=" dBFS" onChange={(ceilingDb) => onChange({ ...settings, ceilingDb })} />
     <RangeControl label="Release do limiter" value={settings.releaseMs} min={10} max={1000} step={5} suffix=" ms" onChange={(releaseMs) => onChange({ ...settings, releaseMs })} />
-  </details>
+  </>
 }
 
 function EffectCard({ title, active, toggleDisabled, onToggle, children }: { title: string; active: boolean; toggleDisabled?: boolean; onToggle: () => void; children: React.ReactNode }) {
