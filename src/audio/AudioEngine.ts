@@ -488,7 +488,7 @@ export class AudioEngine {
     const track = project.tracks.find((item) => item.id === trackId)
     const graph = this.liveGraphs.get(trackId)
     if (!active || !track || !graph || !this.context) return
-    const muted = track.mute || (!track.solo && project.tracks.some((item) => item.solo))
+    const muted = track.mute || (!track.solo && project.tracks.some((item) => item.solo && !item.inactive))
     this.applyTrackAutomation(graph, track, muted, this.getCurrentFrame(active.rate), active.rate,
       Math.max(this.context.currentTime, this.playStartedAt), active.pass)
   }
@@ -740,7 +740,8 @@ export class AudioEngine {
       this.playing = true
       return true
     }
-    const soloActive = project.tracks.some((track) => track.solo)
+    const activeTracks = project.tracks.filter((track) => !track.inactive)
+    const soloActive = activeTracks.some((track) => track.solo)
     const generation = this.playGeneration
     const startFrame = this.playheadStartFrame
     this.liveGraphs.clear()
@@ -752,7 +753,7 @@ export class AudioEngine {
     this.liveAuxes = this.makeAuxBuses(context, project, output, this.liveAuxMeters)
     const latencies = new Map<string, number>()
     const pendingOutputs = new Map<string, SendBuses & { main: AudioNode }>()
-    for (const track of project.tracks) {
+    for (const track of activeTracks) {
       const trackOutput = context.createGain()
       const trackBuses = { reverb: context.createGain(), delay: context.createGain() }
       const graph = this.makeTrackGraph(context, track, trackOutput, soloActive, trackBuses)
@@ -768,7 +769,7 @@ export class AudioEngine {
       pendingOutputs.set(track.id, { main: trackOutput, ...trackBuses })
     }
     const maxLatency = Math.max(0, ...latencies.values())
-    for (const track of project.tracks) {
+    for (const track of activeTracks) {
       const taps = pendingOutputs.get(track.id)!
       const compensation = Math.max(0, maxLatency - (latencies.get(track.id) ?? 0))
       const align = (source: AudioNode): AudioNode => {
@@ -783,9 +784,9 @@ export class AudioEngine {
     }
     const startAt = context.currentTime + (this.recordingWindow ? 0.12 : 0.04)
     const from = startFrame / project.audioSampleRate
-    const pass = new AutomationPass(project.tracks, startFrame, project.audioSampleRate)
+    const pass = new AutomationPass(activeTracks, startFrame, project.audioSampleRate)
     this.automationPlayback = { pass, rate: project.audioSampleRate }
-    for (const track of project.tracks) {
+    for (const track of activeTracks) {
       const graph = this.liveGraphs.get(track.id)!
       this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), startFrame, project.audioSampleRate, startAt, pass)
       if (graph.instrument) graph.instrument.port.postMessage({
@@ -867,7 +868,7 @@ export class AudioEngine {
     for (const bus of project.auxBuses ?? []) {
       this.liveAuxes.get(bus.id)?.gain.setTargetAtTime(bus.mute ? 0 : dbToGain(bus.gainDb), at, 0.015)
     }
-    const soloActive = project.tracks.some((track) => track.solo)
+    const soloActive = project.tracks.some((track) => track.solo && !track.inactive)
     project.tracks.forEach((track) => {
       const graph = this.liveGraphs.get(track.id)
       if (!graph) return
@@ -1214,12 +1215,12 @@ export class AudioEngine {
     source.start(sourceAt, clip.sourceOffsetFrame / project.audioSampleRate, clip.durationFrames / project.audioSampleRate)
   }
 
-  private async scheduleRenderTrack(offline: OfflineAudioContext, project: AudioProject, track: Track, graph: TrackGraph): Promise<void> {
+  private async scheduleRenderTrack(offline: OfflineAudioContext, project: AudioProject, track: Track, input: AudioNode): Promise<void> {
     const clips = project.clips.filter((clip) => clip.trackId === track.id && clipIsAudible(project, clip))
     const inserts = (track.vst3Inserts ?? []).filter((insert) => !insert.bypass)
     if (!inserts.length) {
-      for (const clip of clips) this.scheduleRenderClip(offline, project, clip, graph.highPass)
-      this.scheduleMidi(offline, track, graph.highPass, project.bpm, 0, 0)
+      for (const clip of clips) this.scheduleRenderClip(offline, project, clip, input)
+      this.scheduleMidi(offline, track, input, project.bpm, 0, 0)
       return
     }
     if (!isDesktopRuntime()) throw new Error('Abra o projeto no Vale Studio Desktop para exportar os inserts VST3 ativos.')
@@ -1272,7 +1273,7 @@ export class AudioEngine {
     }
     const source = offline.createBufferSource()
     source.buffer = buffer
-    source.connect(graph.highPass)
+    source.connect(input)
     source.start()
   }
 
@@ -1282,16 +1283,16 @@ export class AudioEngine {
     const master = offline.createGain()
     master.gain.value = masterLevel(project)
     master.connect(offline.destination)
-    const soloActive = project.tracks.some((track) => track.solo)
+    const soloActive = project.tracks.some((track) => track.solo && !track.inactive)
     const buses = this.makeSendBuses(offline, master)
     const auxes = this.makeAuxBuses(offline, project, master)
     for (const track of project.tracks) {
-      if (track.mute || (soloActive && !track.solo)) continue
+      if (track.inactive || track.mute || (soloActive && !track.solo)) continue
       const output = offline.createGain()
       const graph = this.makeTrackGraph(offline, track, output, soloActive, buses)
       this.routeTrackOutput(output, graph, track, master, auxes)
       this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
-      await this.scheduleRenderTrack(offline, project, track, graph)
+      await this.scheduleRenderTrack(offline, project, track, graph.highPass)
     }
     return offline.startRendering()
   }
@@ -1340,7 +1341,22 @@ export class AudioEngine {
     const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, output, false, this.makeSendBuses(offline, master))
     this.routeTrackOutput(output, graph, track, master, this.makeAuxBuses(offline, project, master))
     this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
-    await this.scheduleRenderTrack(offline, project, track, graph)
+    if (!track.inactive) await this.scheduleRenderTrack(offline, project, track, graph.highPass)
+    return offline.startRendering()
+  }
+
+  async renderTrackToAudio(project: AudioProject, track: Track): Promise<AudioBuffer> {
+    const clips = project.clips.filter((clip) => clip.trackId === track.id && clipIsAudible(project, clip))
+    const notes = track.kind === 'midi' ? track.midiNotes ?? [] : []
+    if (!clips.length && !notes.length) throw new Error('A pista precisa de um clipe ativo ou de notas MIDI.')
+    if (clips.some((clip) => !this.assetBuffers.has(clip.assetId))) throw new Error('Há clipes cujo áudio ainda não foi carregado.')
+    const rate = project.audioSampleRate
+    const clipEnd = clips.reduce((end, clip) => Math.max(end, clip.timelineStartFrame + clip.durationFrames), 0)
+    const noteEnd = notes.reduce((end, note) => Math.max(end, note.startBeat + note.durationBeats), 0)
+    const tail = notes.length || (track.vst3Inserts ?? []).some((insert) => !insert.bypass) ? Math.round(rate * 1.5) : 0
+    const frames = Math.max(clipEnd, Math.ceil(noteEnd * 60 / project.bpm * rate)) + tail
+    const offline = new OfflineAudioContext(2, frames, rate)
+    await this.scheduleRenderTrack(offline, project, track, offline.destination)
     return offline.startRendering()
   }
 
@@ -1350,7 +1366,9 @@ export class AudioEngine {
   }
 
   async exportStems(project: AudioProject): Promise<StemExport[]> {
-    const tracksWithAudio = project.tracks.filter((track) => project.clips.some((clip) => clip.trackId === track.id && clipIsAudible(project, clip)))
+    const tracksWithAudio = project.tracks.filter((track) => !track.inactive && (
+      (track.kind === 'midi' && Boolean(track.midiNotes?.length)) ||
+      project.clips.some((clip) => clip.trackId === track.id && clipIsAudible(project, clip))))
     const stems: StemExport[] = []
     for (const track of tracksWithAudio) {
       const buffer = await this.renderStem(project, track.id)

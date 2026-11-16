@@ -124,12 +124,15 @@ export const projectRepository = {
   async restoreProject(project: AudioProject, assets: Array<{ asset: MediaAsset; blob: Blob }>): Promise<void> {
     const expectedAssets = new Set(project.assets.map((asset) => asset.id))
     if (assets.length !== expectedAssets.size || assets.some(({ asset }) => !expectedAssets.has(asset.id))) throw new Error('O backup não contém exatamente os áudios declarados pelo projeto.')
+    await this.saveProjectWithAssets(project, assets)
+  },
+
+  async saveProjectWithAssets(project: AudioProject, assets: Array<{ asset: MediaAsset; blob: Blob }>): Promise<void> {
     const database = await openDatabase()
     const transaction = database.transaction([PROJECT_STORE, ASSET_STORE], 'readwrite')
     assets.forEach(({ asset, blob }) => transaction.objectStore(ASSET_STORE).put({ id: asset.id, blob } satisfies StoredAsset))
     transaction.objectStore(PROJECT_STORE).put({ ...project, updatedAt: new Date().toISOString() })
-    await transactionComplete(transaction)
-    database.close()
+    try { await transactionComplete(transaction) } finally { database.close() }
   },
 
   async loadAsset(id: string): Promise<Blob | undefined> {

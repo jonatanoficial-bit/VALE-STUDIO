@@ -33,8 +33,8 @@ function makeId(): string {
 }
 
 function pairedMonoTrack(project: AudioProject, selected?: Track): Track | undefined {
-  if (!selected?.armed || selected.kind === 'midi' || selected.recordChannels === 2) return undefined
-  const armed = project.tracks.filter((track) => track.armed && track.kind !== 'midi')
+  if (!selected?.armed || selected.inactive || selected.kind === 'midi' || selected.recordChannels === 2) return undefined
+  const armed = project.tracks.filter((track) => track.armed && !track.inactive && track.kind !== 'midi')
   return armed.length === 2 ? armed.find((track) => track.id !== selected.id && track.recordChannels !== 2) : undefined
 }
 
@@ -186,7 +186,7 @@ const TimelineClip = memo(function TimelineClip({ clip, asset, color, timelineFr
     }}
     onLostPointerCapture={() => { gesture.current = null; setDraft(undefined) }}>
     <Waveform peaks={peaks} color={color} />
-    <small>{asset?.name.replace(/\.[^.]+$/, '')}</small>
+    <small>{clip.positionLocked ? '🔒 ' : ''}{asset?.name.replace(/\.[^.]+$/, '')}</small>
   </button>
 })
 
@@ -313,6 +313,7 @@ export default function App() {
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
   const [mixAutomationValues, setMixAutomationValues] = useState<Record<string, Partial<Record<AutomationLane, number>>>>({})
   const trackDialog = useRef<HTMLDialogElement>(null)
+  const renderTrackDialog = useRef<HTMLDialogElement>(null)
   const newTrackDialog = useRef<HTMLDialogElement>(null)
   const firstFadeInput = useRef<HTMLInputElement>(null)
   const [fadeFocusRequest, setFadeFocusRequest] = useState(0)
@@ -491,7 +492,7 @@ export default function App() {
   }, [isRecording])
 
   const editTimelineClip = useCallback((updated: Clip) => {
-    updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === updated.id ? updated : clip) }))
+    updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === updated.id && !clip.positionLocked ? updated : clip) }))
   }, [updateProject])
 
   function updateTrack(id: string, change: (track: Track) => Track) {
@@ -865,7 +866,7 @@ export default function App() {
     const current = projectRef.current
     const trackId = selectedTrackIdRef.current
     const track = current?.tracks.find((item) => item.id === trackId)
-    if (!current || !track || track.kind !== 'midi') return
+    if (!current || !track || track.inactive || track.kind !== 'midi') return
     if (message.type === 'noteon') {
       engineRef.current.playMidiNote(message.note, message.velocity, track.id)
       if (recordingRef.current && track.armed) {
@@ -973,7 +974,7 @@ export default function App() {
     if (!project) return
     const recordingTrackId = isRecording ? activeDraftRef.current?.trackId : undefined
     const recordTrack = recordingTrackId ? project.tracks.find((track) => track.id === recordingTrackId) : selectedTrack
-    if (!recordTrack) return
+    if (!recordTrack || recordTrack.inactive) return
     if (recordTrack.kind === 'midi') {
       if (isRecording) {
         finishMidiNotes()
@@ -1320,7 +1321,8 @@ export default function App() {
   }
 
   function updateClip(action: 'moveLeft' | 'moveRight' | 'duplicate' | 'split' | 'fadeIn' | 'fadeOut' | 'crossfade' | 'remove') {
-    if (!project || !selectedClip || isPlaying || isRecording) return
+    if (!project || !selectedClip || isPlaying || isRecording || isStarting || recordTransition.current) return
+    if (selectedClip.positionLocked && ['moveLeft', 'moveRight', 'split', 'remove'].includes(action)) return
     if (action === 'crossfade') {
       const current = project.clips.filter((clip) => clip.trackId === selectedClip.trackId
         && clipIsAudible(project, clip))
@@ -1351,7 +1353,7 @@ export default function App() {
       return
     }
     if (action === 'duplicate') {
-      const copy: Clip = { ...selectedClip, id: makeId(), timelineStartFrame: selectedClip.timelineStartFrame + beat }
+      const copy: Clip = { ...selectedClip, id: makeId(), positionLocked: false, timelineStartFrame: selectedClip.timelineStartFrame + beat }
       updateProject((current) => ({ ...current, clips: [...current.clips, copy], tracks: current.tracks.map((track) => track.id === copy.trackId ? { ...track, clipIds: [...track.clipIds, copy.id] } : track) }))
       setSelectedClipId(copy.id)
       return
@@ -1438,6 +1440,51 @@ export default function App() {
     {showNewProject && <NewProjectDialog onCreate={createNewProject} onCancel={() => setShowNewProject(false)} />}{toast && <div className={`toast ${toast.tone}`}>{toast.text}</div>}
   </main>
 
+  async function commitTrack(sourceTrack: Track, session: AudioProject) {
+    const dialog = renderTrackDialog.current
+    if (!dialog || recordTransition.current || asioBusy || !canEditTimeline || sourceTrack.inactive) return
+    recordTransition.current = true
+    dialog.showModal()
+    try {
+      const buffer = await engineRef.current.renderTrackToAudio(session, sourceTrack)
+      const blob = encodeWav(buffer, 32)
+      const name = `${sourceTrack.name} · Áudio`
+      const asset: MediaAsset = {
+        id: makeId(), name: `${name}.wav`, mimeType: 'audio/wav', sampleRate: buffer.sampleRate,
+        channels: buffer.numberOfChannels, frames: buffer.length, durationFrames: buffer.length,
+        byteLength: blob.size, peaks: buildPeaks(buffer), createdAt: new Date().toISOString(),
+      }
+      const track: Track = {
+        ...sourceTrack, id: makeId(), name, kind: 'audio', armed: false, monitorMode: 'off',
+        recordChannels: 2, inputDeviceId: undefined, vst3Inserts: [], midiNotes: [], takeIds: [], compEnabled: false,
+        clipIds: [makeId()],
+      }
+      const clip: Clip = {
+        id: track.clipIds[0], assetId: asset.id, trackId: track.id, timelineStartFrame: 0,
+        sourceOffsetFrame: 0, durationFrames: asset.durationFrames, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0,
+      }
+      if (projectRef.current !== session) throw new Error('A sessão mudou durante a renderização. Tente novamente.')
+      const next = {
+        ...session,
+        tracks: session.tracks.flatMap((item) => item.id === sourceTrack.id ? [{ ...item, inactive: true, armed: false }, track] : [item]),
+        assets: [...session.assets, asset],
+        clips: [...session.clips, clip],
+        updatedAt: asset.createdAt,
+      }
+      await projectRepository.saveProjectWithAssets(next, [{ asset, blob }])
+      engineRef.current.cacheAsset(asset.id, buffer)
+      updateProject(() => next)
+      setSelectedTrackId(track.id)
+      setSelectedClipId(clip.id)
+      setToast({ tone: 'success', text: 'Pista renderizada. A pista original ficou inativa e pode ser reativada.' })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally {
+      dialog.close()
+      recordTransition.current = false
+    }
+  }
+
   const visibleEnd = isRecording ? Math.max(contentEnd, playhead) : contentEnd
   const pageFrames = project.audioSampleRate * 16
   const timelineFrames = Math.max(pageFrames, Math.ceil((visibleEnd + project.audioSampleRate) / pageFrames) * pageFrames)
@@ -1482,7 +1529,7 @@ export default function App() {
             <button type="button" className="transport-button" disabled={!canEditTimeline || asioBusy} title="Avançar 5 segundos" aria-label="Avançar 5 segundos"
               onClick={() => seekTimeline(playhead + project.audioSampleRate * 5)}>⏩</button>
             <button type="button" className={`record-button ${isRecording ? 'active' : ''}`} onClick={() => void toggleRecording()}
-              disabled={asioBusy || !selectedTrack} title={isRecording ? 'Salvar take' : 'Gravar na pista armada'}
+              disabled={asioBusy || !selectedTrack || (!isRecording && selectedTrack.inactive)} title={isRecording ? 'Salvar take' : 'Gravar na pista armada'}
               aria-label={isRecording ? 'Parar e salvar take' : 'Gravar na pista armada'}><span /></button>
           </div>
           <div className="clock" aria-label="Posição do transporte"><b>{formatTransportTime(playhead, project.audioSampleRate)}</b></div>
@@ -1522,7 +1569,7 @@ export default function App() {
               <option value={1}>Mono</option><option value={2}>Estéreo</option>
             </select></label>}
             {selectedTrack?.kind === 'midi' && <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>}
-            {selectedTrack && <button className="button secondary" disabled={isRecording} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
+            {selectedTrack && <button className="button secondary" disabled={isRecording || selectedTrack.inactive} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
           </div>
         </div>
       </details>
@@ -1610,7 +1657,14 @@ export default function App() {
 
     {view === 'tracks' && <section className="track-area">
       <div className="timeline-tools">
-        <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button></div>
+        <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button>
+          {selectedTrack?.inactive ? <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy}
+            onClick={() => updateTrack(selectedTrack.id, (track) => ({ ...track, inactive: false }))}>Reativar pista</button>
+            : selectedTrack && <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy ||
+              (!selectedTrack.midiNotes?.length && !visibleClipsByTrack.get(selectedTrack.id)?.some((clip) => clipIsAudible(project, clip)))}
+              title="Cria uma pista de áudio com os VST3 processados e libera a pista original"
+              onClick={() => void commitTrack(selectedTrack, project)}>Renderizar pista</button>}
+        </div>
         <div className="timeline-zoom">
           <label>Régua <select aria-label="Unidade da régua" value={rulerMode} onChange={(event) => setRulerMode(event.target.value === 'bars' ? 'bars' : 'time')}>
             <option value="time">Minutos e segundos</option><option value="bars">Compassos</option>
@@ -1697,10 +1751,10 @@ export default function App() {
               const target = project.tracks[index + (event.key === 'ArrowUp' ? -1 : 1)]
               if (target) reorderTracks(track.id, target.id)
             }}>⠿</button>
-          <div><strong>{track.name}</strong><small>{track.kind === 'midi' ? 'Instrumento MIDI' : track.recordChannels === 2 ? 'Entrada estéreo' : 'Entrada mono'}</small></div>
+          <div><strong>{track.name}</strong><small>{track.inactive ? 'Pista inativa' : track.kind === 'midi' ? 'Instrumento MIDI' : track.recordChannels === 2 ? 'Entrada estéreo' : 'Entrada mono'}</small></div>
           <TrackMeter value={isRecording ? recordingPeaks[track.id]?.at(-1) ?? trackPeaks[track.id] : trackPeaks[track.id]} />
           <div className="track-toggles">
-            <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording} onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} />
+            <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording || track.inactive} onClick={() => updateTrack(track.id, (current) => ({ ...current, armed: !current.armed }))} />
             <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (current) => ({ ...current, mute: !current.mute }))} />
             <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (current) => ({ ...current, solo: !current.solo }))} />
             {track.kind !== 'midi' && <Toggle pressed={track.monitorMode !== 'off'} label="I" title={`Monitoramento · ${track.monitorMode === 'software' ? 'Software' : track.monitorMode === 'direct' ? 'Direto' : 'Desligado'}`} onClick={() => cycleMonitor(track)} />}
@@ -1723,7 +1777,7 @@ export default function App() {
             <Waveform peaks={recordingPeaks[track.id]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {visibleClipsByTrack.get(track.id)?.map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
-            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil'}
+            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil' && !clip.positionLocked}
             onSelect={selectTimelineClip} onEdit={editTimelineClip} />)}
         </div>
       </article>)}
@@ -1752,7 +1806,25 @@ export default function App() {
           playhead={playhead} frames={timelineFrames} rate={project.audioSampleRate} disabled={!canEditTimeline}
           onChange={(automation) => updateTrack(selectedTrack.id, (track) => ({ ...track, automation }))} />
       </details>}
-      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button onClick={() => updateClip('split')}>Dividir</button><button onClick={() => updateClip('moveLeft')}>← Mover</button><button onClick={() => updateClip('moveRight')}>Mover →</button><button onClick={() => updateClip('duplicate')}>Duplicar</button><button disabled={!canEditTimeline} onClick={() => updateClip('crossfade')}>Crossfade</button>
+      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span>
+        <button type="button" aria-pressed={Boolean(selectedClip.positionLocked)} disabled={!canEditTimeline} onClick={() =>
+          updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, positionLocked: !clip.positionLocked } : clip) }))
+        }>{selectedClip.positionLocked ? 'Desbloquear posição' : 'Bloquear posição'}</button>
+        <form key={`${selectedClip.id}:${selectedClip.timelineStartFrame}`} onSubmit={(event) => {
+          event.preventDefault()
+          const frame = Number(new FormData(event.currentTarget).get('position'))
+          if (!canEditTimeline || selectedClip.positionLocked || !Number.isSafeInteger(frame) || frame < 0 || frame > timelineFrames - selectedClip.durationFrames) return
+          editTimelineClip({ ...selectedClip, timelineStartFrame: frame })
+        }}>
+          <label className="fade-control">Posição em amostras <input type="number" name="position" min={0}
+            max={timelineFrames - selectedClip.durationFrames} step={1} defaultValue={selectedClip.timelineStartFrame}
+            disabled={!canEditTimeline || selectedClip.positionLocked} required /></label>
+          <button disabled={!canEditTimeline || selectedClip.positionLocked}>Posicionar</button>
+        </form>
+        <button disabled={!canEditTimeline || selectedClip.positionLocked} onClick={() => updateClip('split')}>Dividir</button>
+        <button disabled={!canEditTimeline || selectedClip.positionLocked} onClick={() => updateClip('moveLeft')}>← Mover</button>
+        <button disabled={!canEditTimeline || selectedClip.positionLocked} onClick={() => updateClip('moveRight')}>Mover →</button>
+        <button disabled={!canEditTimeline} onClick={() => updateClip('duplicate')}>Duplicar</button><button disabled={!canEditTimeline} onClick={() => updateClip('crossfade')}>Crossfade</button>
         <label className="fade-control">Ganho do clipe (dB)
           <input type="number" min={-60} max={12} step={0.5} value={selectedClip.gainDb} disabled={!canEditTimeline} onChange={(event) => {
             const gain = Math.max(-60, Math.min(12, Number(event.target.value)))
@@ -1768,7 +1840,7 @@ export default function App() {
             const value = Math.max(0, Math.min(maxFrames, frames))
             updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, [field]: value } : clip) }))
           }} />
-        </label>})}<button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
+        </label>})}<button className={selectedClip.fadeInFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeIn')}>Fade In</button><button className={selectedClip.fadeOutFrames ? 'active-edit' : ''} onClick={() => updateClip('fadeOut')}>Fade Out</button><button className="destructive" disabled={!canEditTimeline || selectedClip.positionLocked} onClick={() => updateClip('remove')}>Excluir</button></div>}</section>}
 
     {view === 'mixer' && <section className="mixer-view"><div className="view-intro"><div><h2>Mixer</h2></div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Renderizando…' : 'Exportar WAV'}</button></div><div className="mixer-strip-scroll">{project.tracks.map((track) => <article className={`channel-strip ${selectedTrack?.id === track.id ? 'selected' : ''}`} key={track.id} onClick={() => setSelectedTrackId(track.id)}><span className="track-color" style={{ background: track.color }} /><strong>{track.name}</strong><div className="mixer-routing">
       <button className="button secondary" disabled={isRecording} onClick={() => openTrackPanel(track.id, 'inserts')}>{track.vst3Inserts[0]?.name ?? '＋ Insert VST3'}</button>
@@ -1779,7 +1851,7 @@ export default function App() {
           <small>SENDS</small>
           {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'} value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => updateTrack(track.id, (current) => ({ ...current, sends: { reverb: 0, delay: 0, ...current.sends, [bus]: value / 100 } }))} />)}
         </div><div className="strip-toggles">
-          <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording} onClick={() => updateTrack(track.id, (item) => ({ ...item, armed: !item.armed }))} />
+          <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording || track.inactive} onClick={() => updateTrack(track.id, (item) => ({ ...item, armed: !item.armed }))} />
           {track.kind !== 'midi' && <Toggle pressed={track.monitorMode !== 'off'} label="I" title="Monitoramento de entrada" onClick={() => cycleMonitor(track)} />}
           <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (item) => ({ ...item, mute: !item.mute }))} />
           <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (item) => ({ ...item, solo: !item.solo }))} />
@@ -1840,6 +1912,10 @@ export default function App() {
 
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
+    <dialog ref={renderTrackDialog} className="routing-dialog" aria-labelledby="render-track-title" onCancel={(event) => event.preventDefault()}>
+      <h2 id="render-track-title">Renderizando pista</h2>
+      <progress aria-label="Renderização da pista em andamento" />
+    </dialog>
     <dialog ref={newTrackDialog} className="routing-dialog" aria-labelledby="new-track-title">
       <header><h2 id="new-track-title">Nova pista</h2><form method="dialog"><button className="icon-button" aria-label="Fechar">×</button></form></header>
       <button className="button secondary" type="button" onClick={() => { addTrack(); setView('tracks'); newTrackDialog.current?.close() }}>Pista de áudio</button>

@@ -79,6 +79,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   const hasInvalidClip = (project.clips as unknown[]).some((clip) => {
     const item = asRecord(clip)
     if (item?.compSegment !== undefined && (item.compSegment !== true || item.takeId !== undefined)) return true
+    if (item?.positionLocked !== undefined && typeof item.positionLocked !== 'boolean') return true
     return !item || typeof item.assetId !== 'string' || typeof item.trackId !== 'string' || !projectAssetIds.has(item.assetId) || !trackIds.has(item.trackId) || (item.takeId !== undefined && (typeof item.takeId !== 'string' || !takeIds.has(item.takeId)))
   })
   const hasInvalidTake = (project.takes as unknown[]).some((take) => {
@@ -88,6 +89,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
   const hasInvalidTrackLinks = (project.tracks as unknown[]).some((track) => {
     const item = asRecord(track)
     if (item?.compEnabled !== undefined && typeof item.compEnabled !== 'boolean') return true
+    if (item?.inactive !== undefined && typeof item.inactive !== 'boolean') return true
     if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true
     if (item?.inputDeviceId !== undefined && typeof item.inputDeviceId !== 'string') return true
     if (item?.outputBusId !== undefined && (typeof item.outputBusId !== 'string' || !auxIds.has(item.outputBusId))) return true

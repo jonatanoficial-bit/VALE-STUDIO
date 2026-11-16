@@ -73,6 +73,7 @@ export type Clip = {
   gainDb: number
   fadeInFrames: number
   fadeOutFrames: number
+  positionLocked?: boolean
   takeId?: string
   compSegment?: true
 }
@@ -108,6 +109,7 @@ export type Track = {
   effects: EffectSettings
   vst3Inserts: Vst3Insert[]
   kind?: 'audio' | 'midi'
+  inactive?: boolean
   midiNotes?: MidiNote[]
   clipIds: string[]
   takeIds: string[]

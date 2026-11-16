@@ -33,6 +33,9 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 
 ## Evidência inicial e ordem
 
+- A edição permite posicionar um clipe por amostras e bloquear seu deslocamento, trim, divisão e remoção. O bloqueio acompanha o projeto no backup.
+- Em Pistas, **Renderizar pista** gera um clipe WAV estéreo a partir dos clipes audíveis ou notas MIDI, com os VST3 ativos. A nova pista herda volume, pan, efeitos internos, automação e roteamento. A pista original fica inativa, preservando MIDI, takes e inserts, e pode ser reativada. O congelamento reversível no mesmo canal e a compensação integral de latência dos plugins seguem pendentes.
+
 - O executável extraído do MSI x64 abriu em um perfil WebView2 isolado. O IPC WASAPI listou dispositivos, enviou PCM estéreo e leu o sinal no cabo virtual. Esse teste verifica o pacote gerado antes da implementação de punch e loop.
 - No Edge com microfone simulado, o punch criou um trecho de 0,4 s no comp e preservou o take original nas duas bordas. O loop confirmou três arquivos independentes, com o mesmo início e duração, e ativou a última passagem completa. Uma execução encontrou um timestamp repetido do AudioWorklet, encerrou o loop e preservou a captura em takes alternativos. O worklet agora ignora os frames já capturados. Os testes unitários cobrem timestamps repetidos, janelas que cortam quanta do AudioWorklet, perda de entrada, início atrasado e checkpoints que cruzam fronteiras entre passagens.
 - O punch programado aplica o intervalo definido à pista de takes. A compensação manual de entrada ainda precisa ser validada nesse modo. O loop de áudio suporta 2–8 passagens e reproduz uma mixagem preparada do intervalo.
