@@ -36,6 +36,15 @@ function validAutomationLane(input: unknown, min: number, max: number): boolean 
   return true
 }
 
+function validDynamics(input: unknown, bounds: Array<[string, number, number]>): boolean {
+  if (input === undefined) return true
+  const settings = asRecord(input)
+  return Boolean(settings && typeof settings.enabled === 'boolean' && bounds.every(([key, min, max]) => {
+    const metric = settings[key]
+    return typeof metric === 'number' && Number.isFinite(metric) && metric >= min && metric <= max
+  }))
+}
+
 function assertArchive(value: unknown): asserts value is ProjectArchive {
   const archive = asRecord(value)
   const project = asRecord(archive?.project)
@@ -48,6 +57,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     return new Set(ids)
   }
   const projectAssetIds = identifiers(project.assets as unknown[], 'Manifesto de áudios')
+  if (!validDynamics(project.masterLimiter, [['ceilingDb', -12, 0], ['releaseMs', 10, 1000]])) throw new Error('Limiter master inválido no backup.')
   const trackIds = identifiers(project.tracks as unknown[], 'Lista de pistas')
   const clipIds = identifiers(project.clips as unknown[], 'Lista de clipes')
   const takeIds = identifiers(project.takes as unknown[], 'Lista de takes')
@@ -115,6 +125,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
         !validAutomationLane(automation.gainDb, -60, 6) || !validAutomationLane(automation.pan, -1, 1)) return true
     }
     const effectSettings = asRecord(item?.effects)
+    if (!validDynamics(effectSettings?.gate, [['thresholdDb', -80, 0], ['depthDb', -80, 0], ['releaseMs', 10, 1000]])) return true
     if (effectSettings?.eq !== undefined) {
       const eq = asRecord(effectSettings.eq)
       if (!eq || typeof eq.enabled !== 'boolean' || ['low', 'mid', 'high'].some((band) => {

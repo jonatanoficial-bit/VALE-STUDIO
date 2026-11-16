@@ -3,6 +3,7 @@ import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
 import { clipIsAudible } from '../domain/comp'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
+import { createDynamics, DEFAULT_GATE, DEFAULT_LIMITER, loadDynamics, setDynamics } from './dynamics'
 import { finishAsioCapture, isDesktopRuntime, MAX_WASAPI_BACKING_FRAMES, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings, type WasapiCaptureStats } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
@@ -10,6 +11,7 @@ type NativeInsert = { id: string; node: AudioWorkletNode; close: () => void; sho
 
 type TrackGraph = {
   highPass: BiquadFilterNode
+  gate?: AudioWorkletNode
   eq: Record<'low' | 'mid' | 'high', BiquadFilterNode>
   compressor: DynamicsCompressorNode
   reverbGain: GainNode
@@ -109,6 +111,7 @@ export class AudioEngine {
   private metronomeNextBeat = 0
   private metronomeBeat = 0
   private master?: GainNode
+  private limiter?: AudioWorkletNode
   private assetBuffers = new Map<string, AudioBuffer>()
   private liveGraphs = new Map<string, TrackGraph>()
   private automationPlayback?: { pass: AutomationPass; rate: number }
@@ -411,7 +414,9 @@ export class AudioEngine {
     const processed = live || track.effects.compressorEnabled
       ? compressor
       : new DelayNode(context, { delayTime: 0.006, channelCount: 2, channelCountMode: 'explicit' })
-    equalized.connect(processed).connect(panner)
+    const gate = track.effects.gate?.enabled ? createDynamics(context, { mode: 'gate', settings: track.effects.gate }) : undefined
+    const filtered = gate ? equalized.connect(gate) : equalized
+    filtered.connect(processed).connect(panner)
     if (live || track.effects.reverbEnabled) {
       reverb.buffer = createImpulse(context)
       processed.connect(reverb).connect(reverbGain).connect(panner)
@@ -431,7 +436,7 @@ export class AudioEngine {
       if (live || sends[bus].gain.value > 0) fader.connect(sends[bus]).connect(buses[bus])
     }
 
-    return { highPass, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
+    return { highPass, gate, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
   }
 
   private applyTrackAutomation(graph: TrackGraph, track: Track, muted: boolean, frame: number, rate: number, at: number, pass?: AutomationPass): void {
@@ -725,6 +730,7 @@ export class AudioEngine {
     this.stopSources()
     const window = this.recordingWindow
     if (window?.loop && this.recorder) {
+      if (this.limiter) setDynamics(this.limiter, { mode: 'limiter', settings: DEFAULT_LIMITER }, context.currentTime)
       const { audio, passes } = window.loop
       const source = context.createBufferSource()
       source.buffer = audio
@@ -746,6 +752,16 @@ export class AudioEngine {
     const activeTracks = project.tracks.filter((track) => !track.inactive)
     const soloActive = activeTracks.some((track) => track.solo)
     const generation = this.playGeneration
+    if (project.masterLimiter?.enabled || activeTracks.some((track) => track.effects.gate?.enabled)) {
+      await loadDynamics(context)
+      if (generation !== this.playGeneration) return false
+    }
+    if (project.masterLimiter?.enabled && !this.limiter && this.masterAnalyser) {
+      this.limiter = createDynamics(context, { mode: 'limiter', settings: project.masterLimiter })
+      this.master.disconnect(this.masterAnalyser)
+      this.master.connect(this.limiter).connect(this.masterAnalyser)
+    }
+    if (this.limiter) setDynamics(this.limiter, { mode: 'limiter', settings: project.masterLimiter ?? DEFAULT_LIMITER }, context.currentTime)
     const startFrame = this.playheadStartFrame
     this.liveGraphs.clear()
     const output = this.context.createGain()
@@ -867,7 +883,10 @@ export class AudioEngine {
 
   updateMix(project: AudioProject): void {
     const at = this.context?.currentTime ?? 0
-    if (!this.loopPlayback) this.master?.gain.setTargetAtTime(masterLevel(project), at, 0.015)
+    if (!this.loopPlayback) {
+      this.master?.gain.setTargetAtTime(masterLevel(project), at, 0.015)
+      if (this.limiter) setDynamics(this.limiter, { mode: 'limiter', settings: project.masterLimiter ?? DEFAULT_LIMITER }, at)
+    }
     for (const bus of project.auxBuses ?? []) {
       this.liveAuxes.get(bus.id)?.gain.setTargetAtTime(bus.mute ? 0 : dbToGain(bus.gainDb), at, 0.015)
     }
@@ -879,6 +898,7 @@ export class AudioEngine {
         graph.sends[bus].gain.setTargetAtTime(sendLevel(track.sends?.[bus]), at, 0.015)
       }
       graph.highPass.frequency.setTargetAtTime(track.effects.highPassEnabled ? track.effects.highPassHz : 10, at, 0.015)
+      if (graph.gate) setDynamics(graph.gate, { mode: 'gate', settings: track.effects.gate ?? DEFAULT_GATE }, at)
       for (const band of ['low', 'mid', 'high'] as const) graph.eq[band].gain.setTargetAtTime(track.effects.eq?.enabled ? track.effects.eq[band] : 0, at, 0.015)
       graph.compressor.threshold.setTargetAtTime(track.effects.compressorEnabled ? track.effects.threshold : 0, at, 0.015)
       graph.compressor.ratio.setTargetAtTime(track.effects.compressorEnabled ? track.effects.ratio : 1, at, 0.015)
@@ -1203,12 +1223,12 @@ export class AudioEngine {
     return Math.max(project.audioSampleRate, Math.max(lastFrame, lastMidiFrame) + tailFrames)
   }
 
-  private scheduleRenderClip(offline: OfflineAudioContext, project: AudioProject, clip: Clip, input: AudioNode): void {
+  private scheduleRenderClip(offline: OfflineAudioContext, project: AudioProject, clip: Clip, input: AudioNode, originFrame = 0): void {
     const sourceBuffer = this.assetBuffers.get(clip.assetId)
     if (!sourceBuffer) return
     const source = offline.createBufferSource()
     source.buffer = sourceBuffer
-    const sourceAt = clip.timelineStartFrame / project.audioSampleRate
+    const sourceAt = (clip.timelineStartFrame - originFrame) / project.audioSampleRate
     if (clip.gainDb === 0 && !clip.fadeInFrames && !clip.fadeOutFrames) source.connect(input)
     else {
       const clipGain = offline.createGain()
@@ -1285,12 +1305,14 @@ export class AudioEngine {
     const offline = new OfflineAudioContext(2, throughFrame ?? this.renderLength(project), project.audioSampleRate)
     const master = offline.createGain()
     master.gain.value = masterLevel(project)
-    master.connect(offline.destination)
     const soloActive = project.tracks.some((track) => track.solo && !track.inactive)
+    const tracks = project.tracks.filter((track) => !track.inactive && !track.mute && (!soloActive || track.solo))
+    if (project.masterLimiter?.enabled || tracks.some((track) => track.effects.gate?.enabled)) await loadDynamics(offline)
+    if (project.masterLimiter?.enabled) master.connect(createDynamics(offline, { mode: 'limiter', settings: project.masterLimiter })).connect(offline.destination)
+    else master.connect(offline.destination)
     const buses = this.makeSendBuses(offline, master)
     const auxes = this.makeAuxBuses(offline, project, master)
-    for (const track of project.tracks) {
-      if (track.inactive || track.mute || (soloActive && !track.solo)) continue
+    for (const track of tracks) {
       const output = offline.createGain()
       const graph = this.makeTrackGraph(offline, track, output, soloActive, buses)
       this.routeTrackOutput(output, graph, track, master, auxes)
@@ -1345,6 +1367,8 @@ export class AudioEngine {
     const track = project.tracks.find((item) => item.id === trackId)
     if (!track) throw new Error('A pista deste stem não existe mais.')
     const offline = new OfflineAudioContext(2, this.renderLength(project), project.audioSampleRate)
+    if (track.inactive) return offline.startRendering()
+    if (track.effects.gate?.enabled) await loadDynamics(offline)
     const master = offline.createGain()
     master.gain.value = 0.92
     master.connect(offline.destination)
@@ -1352,7 +1376,7 @@ export class AudioEngine {
     const graph = this.makeTrackGraph(offline, { ...track, mute: false, solo: false }, output, false, this.makeSendBuses(offline, master))
     this.routeTrackOutput(output, graph, track, master, this.makeAuxBuses(offline, project, master))
     this.applyTrackAutomation(graph, track, false, 0, project.audioSampleRate, 0)
-    if (!track.inactive) await this.scheduleRenderTrack(offline, project, track, graph.highPass)
+    await this.scheduleRenderTrack(offline, project, track, graph.highPass)
     return offline.startRendering()
   }
 
@@ -1368,6 +1392,17 @@ export class AudioEngine {
     const frames = Math.max(clipEnd, Math.ceil(noteEnd * 60 / project.bpm * rate)) + tail
     const offline = new OfflineAudioContext(2, frames, rate)
     await this.scheduleRenderTrack(offline, project, track, offline.destination)
+    return offline.startRendering()
+  }
+
+  async renderClipSelection(project: AudioProject, clips: Clip[], start: number, end: number): Promise<AudioBuffer> {
+    const channels = clips.reduce((maximum, clip) => {
+      const buffer = this.assetBuffers.get(clip.assetId)
+      if (!buffer) throw new Error('Há clipes cujo áudio ainda não foi carregado.')
+      return Math.max(maximum, Math.min(buffer.numberOfChannels, 2))
+    }, 1)
+    const offline = new OfflineAudioContext(channels, end - start, project.audioSampleRate)
+    for (const clip of clips) this.scheduleRenderClip(offline, project, clip, offline.destination, start)
     return offline.startRendering()
   }
 

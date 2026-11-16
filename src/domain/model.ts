@@ -11,6 +11,7 @@ export const MAX_AUX_SENDS = 10
 export const DEFAULT_VST_BUFFER_FRAMES = 512
 
 export type EffectSettings = {
+  gate?: GateSettings
   eq?: { enabled: boolean; low: number; mid: number; high: number }
   highPassEnabled: boolean
   highPassHz: number
@@ -133,6 +134,7 @@ export type AudioProject = {
   timeSignature: TimeSignature
   metronomeEnabled: boolean
   masterGainDb?: number
+  masterLimiter?: LimiterSettings
   vstBufferFrames?: 256 | 512 | 1024 | 2048 | 4096
   countInBars: 0 | 1 | 2
   calibrationFrames: number
@@ -211,3 +213,5 @@ export function dbToGain(value: number): number {
 export function gainToDb(value: number): number {
   return value <= 0 ? -96 : 20 * Math.log10(value)
 }
+export type GateSettings = { enabled: boolean; thresholdDb: number; depthDb: number; releaseMs: number }
+export type LimiterSettings = { enabled: boolean; ceilingDb: number; releaseMs: number }

@@ -12,6 +12,9 @@ import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
 import type { AudioProject, AutomationLane, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, TrackAutomation, Vst3Insert } from './domain/model'
 import { applyCompRegion, clipIsAudible } from './domain/comp'
+import { clipsForConsolidation } from './domain/consolidate'
+import { DEFAULT_GATE, DEFAULT_LIMITER } from './audio/dynamics'
+import type { GateSettings, LimiterSettings } from './domain/model'
 import { loopSlices } from './audio/loopRecording'
 import { createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
@@ -1630,6 +1633,50 @@ export default function App() {
     }
   }
 
+  async function consolidateRange() {
+    const dialog = renderTrackDialog.current
+    if (!project || !range || !dialog || !selectedTrack || !canEditTimeline || asioBusy || recordTransition.current) return
+    const session = project
+    const track = selectedTrack
+    recordTransition.current = true
+    dialog.showModal()
+    try {
+      const clips = clipsForConsolidation(session, track.id, range.start, range.end)
+      const buffer = await engineRef.current.renderClipSelection(session, clips, range.start, range.end)
+      const blob = encodeWav(buffer, 32)
+      const asset: MediaAsset = {
+        id: makeId(), name: `${track.name} · Consolidado.wav`, mimeType: 'audio/wav', sampleRate: buffer.sampleRate,
+        channels: buffer.numberOfChannels, frames: buffer.length, durationFrames: buffer.length,
+        byteLength: blob.size, peaks: buildPeaks(buffer), createdAt: new Date().toISOString(),
+      }
+      const clip: Clip = {
+        id: makeId(), assetId: asset.id, trackId: track.id, timelineStartFrame: range.start,
+        durationFrames: buffer.length, sourceOffsetFrame: 0, gainDb: 0, fadeInFrames: 0, fadeOutFrames: 0,
+        color: clips[0].color,
+      }
+      if (projectRef.current !== session) throw new Error('A sessão mudou durante a consolidação. Tente novamente.')
+      const replaced = new Set(clips.map(({ id }) => id))
+      const next = {
+        ...session,
+        tracks: session.tracks.map((item) => item.id === track.id
+          ? { ...item, clipIds: [...item.clipIds.filter((id) => !replaced.has(id)), clip.id] } : item),
+        clips: [...session.clips.filter((item) => !replaced.has(item.id)), clip],
+        assets: [...session.assets, asset],
+        updatedAt: asset.createdAt,
+      }
+      await projectRepository.saveProjectWithAssets(next, [{ asset, blob }])
+      engineRef.current.cacheAsset(asset.id, buffer)
+      updateProject(() => next)
+      setSelectedClipId(clip.id)
+      setToast({ tone: 'success', text: `${clips.length} clipe(s) consolidado(s) na pista ${track.name}.` })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally {
+      dialog.close()
+      recordTransition.current = false
+    }
+  }
+
   return <main className="app-shell studio-shell">
     <header className="studio-header">
       <div className="studio-transport-row">
@@ -1839,6 +1886,8 @@ export default function App() {
         </form>
         {range && <div className="range-actions">
           <button type="button" className="button secondary" disabled={!canEditTimeline} onClick={() => seekTimeline(range.start)}>Ir ao início</button>
+          <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy || !selectedTrack || selectedTrack.kind === 'midi' || selectedTrack.inactive}
+            onClick={() => void consolidateRange()}>Consolidar nesta pista</button>
           <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy || exportingRange}
             onClick={() => void exportRange()}>{exportingRange ? 'Exportando…' : 'Exportar intervalo WAV'}</button>
           <button type="button" className="button secondary" disabled={!canEditTimeline} onClick={() => setEditRange(undefined)}>Limpar intervalo</button>
@@ -2046,6 +2095,8 @@ export default function App() {
           }} /><TrackMeter value={trackPeaks.master} /></div>
           <output>{dbLabel(project.masterGainDb ?? 0)}</output>
           <PeakHold value={heldPeak('master')} onReset={() => resetPeak('master')} />
+          <MasterLimiter settings={project.masterLimiter ?? DEFAULT_LIMITER} toggleDisabled={!canEditTimeline || asioBusy}
+            onChange={(masterLimiter) => updateProject((current) => ({ ...current, masterLimiter }))} />
           <button className="button secondary" type="button" disabled={!canEditTimeline || (project.auxBuses?.length ?? 0) >= 32} onClick={() => {
             const id = makeId()
             updateProject((current) => ({ ...current, auxBuses: [...(current.auxBuses ?? []), { id, name: `Auxiliar ${(current.auxBuses?.length ?? 0) + 1}`, gainDb: 0, mute: false }] }))
@@ -2053,7 +2104,8 @@ export default function App() {
         </article>
       </div></section>}
 
-    {view === 'effects' && selectedTrack && <section className="effects-view"><div className="view-intro"><div><span className="eyebrow">EFEITOS REAIS</span><h2>{selectedTrack.name}</h2><p>Os controles abaixo alteram o grafo de áudio quando a faixa é reproduzida ou exportada.</p></div><select value={selectedTrack.id} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div><div className="effects-grid"><TrackEqualizer effects={selectedTrack.effects} onChange={(eq) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, eq } }))} /><EffectCard title="Filtro de graves" active={selectedTrack.effects.highPassEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassEnabled: !track.effects.highPassEnabled } }))}><RangeControl label="Frequência" value={selectedTrack.effects.highPassHz} min={20} max={500} suffix=" Hz" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassHz: value } }))} /></EffectCard><EffectCard title="Compressor" active={selectedTrack.effects.compressorEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, compressorEnabled: !track.effects.compressorEnabled } }))}><RangeControl label="Threshold" value={selectedTrack.effects.threshold} min={-60} max={0} suffix=" dB" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, threshold: value } }))} /><RangeControl label="Ratio" value={selectedTrack.effects.ratio} min={1} max={12} step={0.5} suffix=":1" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, ratio: value } }))} /></EffectCard><EffectCard title="Reverb" active={selectedTrack.effects.reverbEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbEnabled: !track.effects.reverbEnabled } }))}><RangeControl label="Mix" value={selectedTrack.effects.reverbMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbMix: value / 100 } }))} /></EffectCard><EffectCard title="Delay" active={selectedTrack.effects.delayEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayEnabled: !track.effects.delayEnabled } }))}><RangeControl label="Tempo" value={selectedTrack.effects.delayTime * 1000} min={40} max={1200} suffix=" ms" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayTime: value / 1000 } }))} /><RangeControl label="Mix" value={selectedTrack.effects.delayMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayMix: value / 100 } }))} /></EffectCard></div></section>}
+    {view === 'effects' && selectedTrack && <section className="effects-view"><div className="view-intro"><div><span className="eyebrow">EFEITOS REAIS</span><h2>{selectedTrack.name}</h2><p>Os controles abaixo alteram o grafo de áudio quando a faixa é reproduzida ou exportada.</p></div><select value={selectedTrack.id} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div><div className="effects-grid"><TrackGate settings={selectedTrack.effects.gate ?? DEFAULT_GATE}
+  toggleDisabled={!canEditTimeline || asioBusy} onChange={(gate) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, gate } }))} /><TrackEqualizer effects={selectedTrack.effects} onChange={(eq) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, eq } }))} /><EffectCard title="Filtro de graves" active={selectedTrack.effects.highPassEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassEnabled: !track.effects.highPassEnabled } }))}><RangeControl label="Frequência" value={selectedTrack.effects.highPassHz} min={20} max={500} suffix=" Hz" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, highPassHz: value } }))} /></EffectCard><EffectCard title="Compressor" active={selectedTrack.effects.compressorEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, compressorEnabled: !track.effects.compressorEnabled } }))}><RangeControl label="Threshold" value={selectedTrack.effects.threshold} min={-60} max={0} suffix=" dB" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, threshold: value } }))} /><RangeControl label="Ratio" value={selectedTrack.effects.ratio} min={1} max={12} step={0.5} suffix=":1" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, ratio: value } }))} /></EffectCard><EffectCard title="Reverb" active={selectedTrack.effects.reverbEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbEnabled: !track.effects.reverbEnabled } }))}><RangeControl label="Mix" value={selectedTrack.effects.reverbMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, reverbMix: value / 100 } }))} /></EffectCard><EffectCard title="Delay" active={selectedTrack.effects.delayEnabled} onToggle={() => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayEnabled: !track.effects.delayEnabled } }))}><RangeControl label="Tempo" value={selectedTrack.effects.delayTime * 1000} min={40} max={1200} suffix=" ms" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayTime: value / 1000 } }))} /><RangeControl label="Mix" value={selectedTrack.effects.delayMix * 100} min={0} max={70} suffix=" %" onChange={(value) => updateTrack(selectedTrack.id, (track) => ({ ...track, effects: { ...track.effects, delayMix: value / 100 } }))} /></EffectCard></div></section>}
 
     {view === 'takes' && <section className="takes-view"><div className="view-intro"><div><span className="eyebrow">GERENCIAMENTO DE TAKES</span><h2>{selectedTrack?.name ?? 'Selecione uma pista'}</h2><p>Escolha um take inteiro ou monte um comp com trechos de diferentes gravações.</p></div><select value={selectedTrack?.id ?? ''} onChange={(event) => setSelectedTrackId(event.target.value)}>{project.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></div>{selectedTrack && project.clips.some((clip) => clip.trackId === selectedTrack.id && clip.compSegment) && <button type="button" className="button secondary" disabled={!canEditTimeline} aria-pressed={Boolean(selectedTrack.compEnabled)} onClick={() => { setSelectedClipId(undefined); updateTrack(selectedTrack.id, (track) => ({ ...track, compEnabled: !track.compEnabled })) }}>{selectedTrack.compEnabled ? 'Ouvir take inteiro' : 'Ativar comp'}</button>}{selectedTrack && project.takes.filter((take) => take.trackId === selectedTrack.id).length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum take nesta pista.</p><small>Arme a pista e grave para criar versões recuperáveis.</small></div> : <div className="take-list">{project.takes.filter((take) => take.trackId === selectedTrack?.id).map((take, index) => { const asset = activeAssetById.get(take.assetId); return <article key={take.id} className={`take-card ${take.selected ? 'selected' : ''}`}><div className="take-wave"><Waveform peaks={asset?.peaks ?? [0]} color={selectedTrack?.color ?? '#1eaeff'} /></div><div className="take-copy"><small>TAKE {String(index + 1).padStart(2, '0')} · {take.selected ? 'ATIVO' : 'ALTERNATIVO'}</small><strong>{take.name}</strong><span>{formatDuration(take.durationFrames, project.audioSampleRate)} · início {formatDuration(take.startFrame, project.audioSampleRate)}</span></div><div className="take-actions"><button className="button secondary" onClick={() => void previewTake(take.id)}>{previewingTakeId === take.id ? 'Ouvindo…' : 'Ouvir'}</button><button className={`button ${take.selected ? 'selected-take' : 'primary'}`} disabled={!canEditTimeline} onClick={() => selectTake(take.id)}>{take.selected && !selectedTrack?.compEnabled ? 'Em uso' : 'Usar take'}</button><details className="comp-region"><summary>Usar trecho no comp</summary><form onSubmit={(event) => {
       event.preventDefault()
@@ -2097,8 +2149,8 @@ export default function App() {
       </div>
     </dialog>
     <dialog ref={renderTrackDialog} className="routing-dialog" aria-labelledby="render-track-title" onCancel={(event) => event.preventDefault()}>
-      <h2 id="render-track-title">Renderizando pista</h2>
-      <progress aria-label="Renderização da pista em andamento" />
+      <h2 id="render-track-title">Processando áudio</h2>
+      <progress aria-label="Processamento de áudio em andamento" />
     </dialog>
     <dialog ref={newTrackDialog} className="routing-dialog" aria-labelledby="new-track-title">
       <header><h2 id="new-track-title">Nova pista</h2><form method="dialog"><button className="icon-button" aria-label="Fechar">×</button></form></header>
@@ -2150,8 +2202,26 @@ function RangeControl({ label, value, min, max, suffix, step = 1, onChange }: { 
   return <label className="range-control"><span>{label}<b>{Number(value.toFixed(2))}{suffix}</b></span><input type="range" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} /></label>
 }
 
-function EffectCard({ title, active, onToggle, children }: { title: string; active: boolean; onToggle: () => void; children: React.ReactNode }) {
-  return <article className={`effect-card ${active ? 'active' : ''}`}><div><span className="effect-indicator" /><h3>{title}</h3><button type="button" className="effect-toggle" aria-pressed={active} onClick={onToggle}>{active ? 'Ativo' : 'Bypass'}</button></div>{children}</article>
+function TrackGate({ settings, toggleDisabled, onChange }: { settings: GateSettings; toggleDisabled: boolean; onChange: (settings: GateSettings) => void }) {
+  return <EffectCard title="Gate" active={settings.enabled} toggleDisabled={toggleDisabled} onToggle={() => onChange({ ...settings, enabled: !settings.enabled })}>
+    <RangeControl label="Limiar do gate" value={settings.thresholdDb} min={-80} max={0} suffix=" dBFS" onChange={(thresholdDb) => onChange({ ...settings, thresholdDb })} />
+    <RangeControl label="Atenuação" value={settings.depthDb} min={-80} max={0} suffix=" dB" onChange={(depthDb) => onChange({ ...settings, depthDb })} />
+    <RangeControl label="Release do gate" value={settings.releaseMs} min={10} max={1000} step={5} suffix=" ms" onChange={(releaseMs) => onChange({ ...settings, releaseMs })} />
+  </EffectCard>
+}
+
+function MasterLimiter({ settings, toggleDisabled, onChange }: { settings: LimiterSettings; toggleDisabled: boolean; onChange: (settings: LimiterSettings) => void }) {
+  return <details className="master-limiter">
+    <summary>Limiter · {settings.enabled ? 'Ativo' : 'Bypass'}</summary>
+    <label><input type="checkbox" aria-label="Ativar limiter master" checked={settings.enabled} disabled={toggleDisabled}
+      onChange={(event) => onChange({ ...settings, enabled: event.target.checked })} /> Ativar</label>
+    <RangeControl label="Teto do master" value={settings.ceilingDb} min={-12} max={0} step={0.1} suffix=" dBFS" onChange={(ceilingDb) => onChange({ ...settings, ceilingDb })} />
+    <RangeControl label="Release do limiter" value={settings.releaseMs} min={10} max={1000} step={5} suffix=" ms" onChange={(releaseMs) => onChange({ ...settings, releaseMs })} />
+  </details>
+}
+
+function EffectCard({ title, active, toggleDisabled, onToggle, children }: { title: string; active: boolean; toggleDisabled?: boolean; onToggle: () => void; children: React.ReactNode }) {
+  return <article className={`effect-card ${active ? 'active' : ''}`}><div><span className="effect-indicator" /><h3>{title}</h3><button type="button" className="effect-toggle" disabled={toggleDisabled} aria-pressed={active} onClick={onToggle}>{active ? 'Ativo' : 'Bypass'}</button></div>{children}</article>
 }
 
 function Vst3CatalogInsert({ plugins, track, onInsert }: { plugins: Vst3Plugin[]; track?: Track; onInsert: (plugin: Vst3Plugin) => void }) {
