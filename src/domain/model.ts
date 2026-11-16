@@ -45,6 +45,7 @@ export type Vst3Insert = {
 export type MidiNote = {
   id: string
   note: number
+  channel?: number
   velocity: number
   startBeat: number
   durationBeats: number
@@ -74,6 +75,7 @@ export type Clip = {
   fadeInFrames: number
   fadeOutFrames: number
   positionLocked?: boolean
+  color?: string
   takeId?: string
   compSegment?: true
 }
@@ -110,6 +112,8 @@ export type Track = {
   vst3Inserts: Vst3Insert[]
   kind?: 'audio' | 'midi'
   inactive?: boolean
+  hiddenInTimeline?: boolean
+  timelineHeight?: 'compact' | 'normal' | 'large'
   midiNotes?: MidiNote[]
   clipIds: string[]
   takeIds: string[]

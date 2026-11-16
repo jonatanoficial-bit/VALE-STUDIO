@@ -80,6 +80,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     const item = asRecord(clip)
     if (item?.compSegment !== undefined && (item.compSegment !== true || item.takeId !== undefined)) return true
     if (item?.positionLocked !== undefined && typeof item.positionLocked !== 'boolean') return true
+    if (item?.color !== undefined && (typeof item.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(item.color))) return true
     return !item || typeof item.assetId !== 'string' || typeof item.trackId !== 'string' || !projectAssetIds.has(item.assetId) || !trackIds.has(item.trackId) || (item.takeId !== undefined && (typeof item.takeId !== 'string' || !takeIds.has(item.takeId)))
   })
   const hasInvalidTake = (project.takes as unknown[]).some((take) => {
@@ -90,6 +91,8 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     const item = asRecord(track)
     if (item?.compEnabled !== undefined && typeof item.compEnabled !== 'boolean') return true
     if (item?.inactive !== undefined && typeof item.inactive !== 'boolean') return true
+    if (item?.hiddenInTimeline !== undefined && typeof item.hiddenInTimeline !== 'boolean') return true
+    if (item?.timelineHeight !== undefined && !['compact', 'normal', 'large'].includes(String(item.timelineHeight))) return true
     if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true
     if (item?.inputDeviceId !== undefined && typeof item.inputDeviceId !== 'string') return true
     if (item?.outputBusId !== undefined && (typeof item.outputBusId !== 'string' || !auxIds.has(item.outputBusId))) return true
@@ -128,6 +131,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     const midiNotes = item?.midiNotes
     const hasInvalidMidi = midiNotes !== undefined && (!Array.isArray(midiNotes) || midiNotes.some((note) => {
       const value = asRecord(note)
+      if (value?.channel !== undefined && (typeof value.channel !== 'number' || !Number.isInteger(value.channel) || value.channel < 0 || value.channel > 15)) return true
       return !value || typeof value.id !== 'string' || typeof value.note !== 'number' || !Number.isInteger(value.note) || value.note < 0 || value.note > 127 || typeof value.velocity !== 'number' || !Number.isInteger(value.velocity) || value.velocity < 0 || value.velocity > 127 || typeof value.startBeat !== 'number' || !Number.isFinite(value.startBeat) || typeof value.durationBeats !== 'number' || !Number.isFinite(value.durationBeats) || value.durationBeats <= 0
     }))
     return !item || (item.kind !== undefined && item.kind !== 'audio' && item.kind !== 'midi') || !Array.isArray(item.clipIds) || !Array.isArray(item.takeIds) || hasInvalidInsert || hasInvalidMidi || item.clipIds.some((id) => typeof id !== 'string' || !clipIds.has(id)) || item.takeIds.some((id) => typeof id !== 'string' || !takeIds.has(id))

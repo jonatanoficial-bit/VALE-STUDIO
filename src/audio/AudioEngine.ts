@@ -193,23 +193,24 @@ export class AudioEngine {
     return Boolean(insert)
   }
 
-  private sendLiveVstNote(trackId: string | undefined, note: number, velocity: number): boolean {
+  private sendLiveVstNote(trackId: string | undefined, note: number, velocity: number, channel: number): boolean {
     if (!this.context || !trackId) return false
     const instrument = this.liveGraphs.get(trackId)?.instrument
     if (!instrument) return false
     const frame = Math.ceil(this.context.currentTime * this.context.sampleRate)
-    instrument.port.postMessage({ type: 'events', events: [{ frame, note, velocity, channel: 0 }] })
+    instrument.port.postMessage({ type: 'events', events: [{ frame, note, velocity, channel }] })
     return true
   }
 
-  playMidiNote(note: number, velocity = 96, trackId?: string): void {
-    if (trackId && this.sendLiveVstNote(trackId, note, velocity)) {
+  playMidiNote(note: number, velocity = 96, trackId?: string, channel = 0): void {
+    const key = channel * 128 + note
+    if (trackId && this.sendLiveVstNote(trackId, note, velocity, channel)) {
       const notes = this.liveVstNotes.get(trackId) ?? new Set<number>()
-      notes.add(note)
+      notes.add(key)
       this.liveVstNotes.set(trackId, notes)
       return
     }
-    if (!this.context || !this.master || this.midiVoices.has(note)) return
+    if (!this.context || !this.master || this.midiVoices.has(key)) return
     const oscillator = this.context.createOscillator()
     const gain = this.context.createGain()
     oscillator.type = 'sawtooth'
@@ -220,27 +221,28 @@ export class AudioEngine {
     oscillator.connect(gain)
     gain.connect(this.master)
     oscillator.start()
-    this.midiVoices.set(note, { oscillator, gain })
+    this.midiVoices.set(key, { oscillator, gain })
   }
 
-  stopMidiNote(note: number, trackId?: string): void {
+  stopMidiNote(note: number, channel = 0): void {
+    const key = channel * 128 + note
     for (const [id, notes] of this.liveVstNotes) {
-      if ((id === trackId || notes.has(note)) && notes.delete(note)) this.sendLiveVstNote(id, note, 0)
+      if (notes.delete(key)) this.sendLiveVstNote(id, note, 0, channel)
     }
-    const voice = this.midiVoices.get(note)
+    const voice = this.midiVoices.get(key)
     if (!voice || !this.context) return
     voice.gain.gain.cancelScheduledValues(this.context.currentTime)
     voice.gain.gain.setTargetAtTime(0.0001, this.context.currentTime, 0.025)
     voice.oscillator.stop(this.context.currentTime + 0.12)
-    this.midiVoices.delete(note)
+    this.midiVoices.delete(key)
   }
 
   stopMidiNotes(): void {
     for (const [trackId, notes] of this.liveVstNotes) {
-      for (const note of notes) this.sendLiveVstNote(trackId, note, 0)
+      for (const key of notes) this.sendLiveVstNote(trackId, key % 128, 0, Math.floor(key / 128))
     }
     this.liveVstNotes.clear()
-    ;[...this.midiVoices.keys()].forEach((note) => this.stopMidiNote(note))
+    for (const key of this.midiVoices.keys()) this.stopMidiNote(key % 128, Math.floor(key / 128))
   }
 
   async decodeAsset(id: string, blob: Blob): Promise<AudioBuffer> {
@@ -709,10 +711,11 @@ export class AudioEngine {
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= Math.max(start, from)) continue
       if (!Number.isInteger(note.note) || note.note < 0 || note.note > 127 || !Number.isFinite(note.velocity)) continue
       const on = toFrame(Math.max(from, start))
-      events.push({ frame: on, note: note.note, velocity: Math.max(1, Math.min(127, Math.round(note.velocity))), channel: 0 })
-      events.push({ frame: Math.max(on + 1, toFrame(end)), note: note.note, velocity: 0, channel: 0 })
+      const channel = note.channel ?? 0
+      events.push({ frame: on, note: note.note, velocity: Math.max(1, Math.min(127, Math.round(note.velocity))), channel })
+      events.push({ frame: Math.max(on + 1, toFrame(end)), note: note.note, velocity: 0, channel })
     }
-    return events.sort((a, b) => a.frame - b.frame)
+    return events.sort((a, b) => a.frame - b.frame || a.velocity - b.velocity)
   }
 
   async play(project: AudioProject, onVstError: (message: string) => void): Promise<boolean> {
@@ -1277,9 +1280,9 @@ export class AudioEngine {
     source.start()
   }
 
-  async renderMix(project: AudioProject): Promise<AudioBuffer> {
+  async renderMix(project: AudioProject, throughFrame?: number): Promise<AudioBuffer> {
     if (!this.context) throw new Error('Ative o áudio antes de exportar.')
-    const offline = new OfflineAudioContext(2, this.renderLength(project), project.audioSampleRate)
+    const offline = new OfflineAudioContext(2, throughFrame ?? this.renderLength(project), project.audioSampleRate)
     const master = offline.createGain()
     master.gain.value = masterLevel(project)
     master.connect(offline.destination)
@@ -1295,6 +1298,14 @@ export class AudioEngine {
       await this.scheduleRenderTrack(offline, project, track, graph.highPass)
     }
     return offline.startRendering()
+  }
+
+  async exportMixRange(project: AudioProject, start: number, end: number): Promise<Blob> {
+    if (![start, end].every(Number.isSafeInteger) || start < 0 || end <= start) throw new Error('Selecione um intervalo válido.')
+    const mix = await this.renderMix(project, end)
+    const range = new AudioBuffer({ length: end - start, sampleRate: mix.sampleRate, numberOfChannels: 2 })
+    for (let channel = 0; channel < 2; channel++) range.copyToChannel(mix.getChannelData(channel).subarray(start, end), channel)
+    return encodeWav(range, 24)
   }
 
   async renderTakeLoop(project: AudioProject, start: number, end: number): Promise<AudioBuffer> {

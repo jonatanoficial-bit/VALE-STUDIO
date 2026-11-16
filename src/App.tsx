@@ -19,6 +19,8 @@ import { projectRepository, type TakeDraft } from './storage/projectRepository'
 import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanDefaultVst3Directories, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
 import { MidiInput, type MidiDevice, type MidiMessage } from './midi/MidiInput'
 import { MidiEditor } from './midi/MidiEditor'
+import { decodeMidiFile, encodeMidiFile } from './midi/midiFile'
+import { TimelineNavigator } from './TimelineNavigator'
 import { PWA_SERVICE_WORKER_AVAILABLE, SERVICE_WORKER_RELOAD_KEY, SERVICE_WORKER_UPDATE_EVENT } from './platform/serviceWorker'
 
 type View = 'tracks' | 'mixer' | 'effects' | 'takes' | 'project'
@@ -42,6 +44,12 @@ function formatDuration(frames: number, rate: number): string {
   const seconds = Math.max(0, frames / rate)
   const minutes = Math.floor(seconds / 60)
   return `${String(minutes).padStart(2, '0')}:${(seconds % 60).toFixed(1).padStart(4, '0')}`
+}
+
+function formatTimecode(samples: number, rate: number): string {
+  const frame = Math.floor(samples * 30 / rate)
+  return [Math.floor(frame / 108000), Math.floor(frame / 1800) % 60, Math.floor(frame / 30) % 60, frame % 30]
+    .map((part) => String(part).padStart(2, '0')).join(':')
 }
 
 function formatTransportTime(frames: number, rate: number): string {
@@ -85,6 +93,26 @@ function storeVst3Directory(directory: string): void {
   } catch {
     // The desktop app remains usable when the embedded WebView blocks storage.
   }
+}
+
+function readVst3List(key: string): unknown[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
+  }
+}
+
+function storeVst3List(key: string, value: unknown[]) {
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* Keep the list available for this session. */ }
+}
+
+function isCachedVst3(value: unknown): value is Vst3Plugin {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<Vst3Plugin>
+  return typeof item.bundlePath === 'string' && typeof item.classId === 'string' && typeof item.name === 'string' &&
+    typeof item.vendor === 'string' && typeof item.version === 'string' && (item.kind === 'effect' || item.kind === 'instrument')
 }
 
 function mergeVst3Plugins(current: Vst3Plugin[], incoming: Vst3Plugin[]): Vst3Plugin[] {
@@ -158,7 +186,7 @@ const TimelineClip = memo(function TimelineClip({ clip, asset, color, timelineFr
       fadeOutFrames: Math.min(clip.fadeOutFrames, Math.floor(duration / 2)) }
   }
 
-  return <button type="button" className={`audio-clip ${selected ? 'selected' : ''} ${draft ? 'clip-moving' : ''} ${tool === 'trim' ? 'clip-trim' : ''}`}
+  return <button type="button" data-clip-id={clip.id} className={`audio-clip ${selected ? 'selected' : ''} ${draft ? 'clip-moving' : ''} ${tool === 'trim' ? 'clip-trim' : ''}`}
     style={{ left: `${visible.timelineStartFrame / timelineFrames * 100}%`, width: `${visible.durationFrames / timelineFrames * 100}%`, '--clip-color': color } as React.CSSProperties}
     aria-label={`Selecionar clipe ${asset?.name ?? 'gravado'}`}
     onClick={(event) => { event.stopPropagation(); onSelect(clip) }}
@@ -262,6 +290,7 @@ export default function App() {
     punch?: PunchRange; loop?: { framesPerPass: number; ids: string[] } } | undefined>(undefined)
   const punchInterrupted = useRef<string | undefined>(undefined)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const midiFileInputRef = useRef<HTMLInputElement>(null)
   const archiveInputRef = useRef<HTMLInputElement>(null)
   const [projects, setProjects] = useState<AudioProject[]>([])
   const [project, setProject] = useState<AudioProject>()
@@ -296,7 +325,8 @@ export default function App() {
     if (!isDesktopRuntime()) return undefined
     return readStoredVst3Directory()
   })
-  const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>([])
+  const [vst3Plugins, setVst3Plugins] = useState<Vst3Plugin[]>(() =>
+    isDesktopRuntime() ? readVst3List('vale-studio:vst3-catalog').filter(isCachedVst3) : [])
   const [vst3ScanErrors, setVst3ScanErrors] = useState<string[]>([])
   const [isScanningVst3, setIsScanningVst3] = useState(false)
   const [vst3ProbeStates, setVst3ProbeStates] = useState<Record<string, Vst3ProbeState>>({})
@@ -309,10 +339,14 @@ export default function App() {
   const [snapToBeat, setSnapToBeat] = useState(false)
   const [gridDivision, setGridDivision] = useState('beat')
   const [clipTool, setClipTool] = useState<'move' | 'trim' | 'pencil'>('move')
-  const [rulerMode, setRulerMode] = useState<'time' | 'bars'>('time')
+  const [rulerMode, setRulerMode] = useState<'time' | 'bars' | 'samples' | 'timecode'>('time')
+  const [editRange, setEditRange] = useState<{ projectId: string; start: number; end: number }>()
+  const [exportingRange, setExportingRange] = useState(false)
   const [trackPanel, setTrackPanel] = useState<'inserts' | 'sends'>()
   const [mixAutomationValues, setMixAutomationValues] = useState<Record<string, Partial<Record<AutomationLane, number>>>>({})
   const trackDialog = useRef<HTMLDialogElement>(null)
+  const navigatorDialog = useRef<HTMLDialogElement>(null)
+  const timelineViewport = useRef<HTMLDivElement>(null)
   const renderTrackDialog = useRef<HTMLDialogElement>(null)
   const newTrackDialog = useRef<HTMLDialogElement>(null)
   const firstFadeInput = useRef<HTMLInputElement>(null)
@@ -380,12 +414,17 @@ export default function App() {
 
   useEffect(() => {
     if (!desktopRuntime) return
+    let active = true
     void Promise.all([scanDefaultVst3Directories(), ...(vst3Directory ? [scanVst3Directory(vst3Directory)] : [])]).then((results) => {
+      if (!active) return
       const plugins = results.flatMap((result) => result.plugins)
       const errors = results.flatMap((result) => result.errors)
-      setVst3Plugins((current) => mergeVst3Plugins(current, plugins))
+      const catalog = mergeVst3Plugins([], plugins)
+      setVst3Plugins(catalog)
+      storeVst3List('vale-studio:vst3-catalog', catalog)
       setVst3ScanErrors(errors)
     }).catch(() => undefined)
+    return () => { active = false }
   }, [desktopRuntime, vst3Directory])
 
   useEffect(() => {
@@ -792,6 +831,55 @@ export default function App() {
     }
   }
 
+  async function importMidi(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || isPlaying || isRecording || isStarting || recordTransition.current) return
+    const activeId = project?.id
+    try {
+      const midi = decodeMidiFile(await file.arrayBuffer(), makeId)
+      if (!midi.tracks.length) throw new Error('O arquivo MIDI não tem notas completas.')
+      const current = projectRef.current
+      if (current?.id !== activeId || recordTransition.current || recordingRef.current) return
+      const target = current ?? createProject(file.name.replace(/\.[^.]+$/, ''), capabilities?.sampleRate)
+      if (!current) {
+        if (midi.bpm !== undefined) target.bpm = Math.min(240, Math.max(40, Number(midi.bpm.toFixed(2))))
+        if (midi.timeSignature) target.timeSignature = midi.timeSignature
+      }
+      const tracks = midi.tracks.map(({ name, notes }, index) => ({
+        ...createMidiTrack(name, TRACK_COLORS[(target.tracks.length + index) % TRACK_COLORS.length]), midiNotes: notes,
+      }))
+      if (current) updateProject((session) => ({ ...session, tracks: [...session.tracks, ...tracks] }))
+      else {
+        setProject({ ...target, tracks })
+        setUndoStack([])
+        setRedoStack([])
+      }
+      setSelectedTrackId(tracks[0].id)
+      setSelectedClipId(undefined)
+      setView('tracks')
+      setToast({ tone: 'success', text: `${tracks.length} pista(s) MIDI importada(s).` })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  function exportMidi(session: AudioProject) {
+    const tracks = session.tracks.flatMap((track) => !track.inactive && track.kind === 'midi' && track.midiNotes?.length
+      ? [{ name: track.name, notes: track.midiNotes }] : [])
+    if (!tracks.length) return
+    try {
+      const href = URL.createObjectURL(encodeMidiFile(tracks, session.bpm, session.timeSignature))
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = `${safeFilePart(session.name, 'projeto')}.mid`
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(href), 5000)
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   async function exportBackup() {
     if (!project) return
     try {
@@ -867,17 +955,18 @@ export default function App() {
     const trackId = selectedTrackIdRef.current
     const track = current?.tracks.find((item) => item.id === trackId)
     if (!current || !track || track.inactive || track.kind !== 'midi') return
+    const key = message.channel * 128 + message.note
     if (message.type === 'noteon') {
-      engineRef.current.playMidiNote(message.note, message.velocity, track.id)
+      engineRef.current.playMidiNote(message.note, message.velocity, track.id, message.channel)
       if (recordingRef.current && track.armed) {
-        activeMidiNotesRef.current.set(message.note, { id: makeId(), note: message.note, velocity: message.velocity, startBeat: currentBeat(current) })
+        activeMidiNotesRef.current.set(key, { id: makeId(), note: message.note, channel: message.channel, velocity: message.velocity, startBeat: currentBeat(current) })
       }
       return
     }
-    engineRef.current.stopMidiNote(message.note, track.id)
-    const started = activeMidiNotesRef.current.get(message.note)
+    engineRef.current.stopMidiNote(message.note, message.channel)
+    const started = activeMidiNotesRef.current.get(key)
     if (!started) return
-    activeMidiNotesRef.current.delete(message.note)
+    activeMidiNotesRef.current.delete(key)
     const note: MidiNote = { ...started, durationBeats: Math.max(0.0625, currentBeat(current) - started.startBeat) }
     setProject((active) => !active ? active : { ...active, updatedAt: new Date().toISOString(), tracks: active.tracks.map((item) => item.id === track.id ? { ...item, midiNotes: [...(item.midiNotes ?? []), note] } : item) })
   }
@@ -1434,6 +1523,8 @@ export default function App() {
     <section className="hero"><div className="eyebrow">ESTÚDIO MULTIPISTA LOCAL</div><h1>Grave. Crie.<br /><span>Misture.</span></h1><p>Seu estúdio multipista em qualquer lugar, sem conta e sem enviar seu áudio para a nuvem.</p><div className="hero-line" /></section>
     <section className="home-actions"><button className="button primary large" onClick={() => setShowNewProject(true)}><b>＋</b><span>Novo projeto<small>Comece uma nova ideia</small></span></button><button className="button secondary large" onClick={() => fileInputRef.current?.click()}><b>↥</b><span>Importar áudio<small>WAV, MP3 ou formato compatível</small></span></button><button className="button secondary large archive-action" onClick={() => archiveInputRef.current?.click()} disabled={archiving === 'import'}><b>⇩</b><span>{archiving === 'import' ? 'Restaurando backup…' : 'Restaurar backup'}<small>Abra uma cópia independente em .valestudio</small></span></button></section>
     <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg" onChange={importAudio} />
+    <button type="button" className="button secondary" onClick={() => midiFileInputRef.current?.click()}>Abrir arquivo MIDI</button>
+    <input ref={midiFileInputRef} className="sr-only" type="file" accept=".mid,.midi,audio/midi" onChange={importMidi} />
     <input ref={archiveInputRef} className="sr-only" type="file" accept={`${PROJECT_ARCHIVE_MIME},${PROJECT_ARCHIVE_EXTENSION},application/json`} onChange={importBackup} />
     <section className="recent-projects"><div className="section-title"><h2>Projetos recentes</h2><span>{projects.length} local{projects.length === 1 ? '' : 'is'}</span></div>{projects.length === 0 ? <div className="empty-state"><span>◇</span><p>Nenhum projeto salvo ainda.</p><small>Crie um projeto para começar a gravar.</small></div> : projects.map((item) => <button className="project-card" key={item.id} onClick={() => void openProject(item.id)}><span className="project-orb">V</span><span><strong>{item.name}</strong><small>{dateLabel(item.updatedAt)} · {item.tracks.length} pista{item.tracks.length === 1 ? '' : 's'} · {item.assets.length} áudio{item.assets.length === 1 ? '' : 's'}</small></span><i>›</i></button>)}</section>
     <footer className="home-footer"><span className="status-dot" />Dados locais · {storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados` : 'armazenamento será verificado no dispositivo'}</footer>
@@ -1485,7 +1576,8 @@ export default function App() {
     }
   }
 
-  const visibleEnd = isRecording ? Math.max(contentEnd, playhead) : contentEnd
+  const range = editRange?.projectId === project.id ? editRange : undefined
+  const visibleEnd = Math.max(contentEnd, range?.end ?? 0, isRecording ? playhead : 0)
   const pageFrames = project.audioSampleRate * 16
   const timelineFrames = Math.max(pageFrames, Math.ceil((visibleEnd + project.audioSampleRate) / pageFrames) * pageFrames)
   const playheadPosition = `${Math.min(100, playhead / timelineFrames * 100)}%`
@@ -1503,6 +1595,39 @@ export default function App() {
     if (!canEditTimeline) return
     const target = Math.max(0, Math.min(timelineFrames, Math.round(frame)))
     if (engineRef.current.seek(target)) setPlayhead(target)
+  }
+
+  function locateClip(clip: Clip) {
+    const track = project?.tracks.find((item) => item.id === clip.trackId)
+    if (!track || !canEditTimeline) return
+    if (track.hiddenInTimeline) updateTrack(track.id, (item) => ({ ...item, hiddenInTimeline: false }))
+    selectTimelineClip(clip)
+    seekTimeline(clip.timelineStartFrame)
+    navigatorDialog.current?.close()
+    window.requestAnimationFrame(() => {
+      timelineViewport.current?.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(clip.id)}"]`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+  }
+
+  async function exportRange() {
+    if (!range || exportingRange || !canEditTimeline || asioBusy || !project) return
+    const session = project
+    setExportingRange(true)
+    try {
+      const audio = capabilities ?? await activateAudio()
+      if (!audio) return
+      const href = URL.createObjectURL(await engineRef.current.exportMixRange(session, range.start, range.end))
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = `${safeFilePart(session.name, 'projeto')}-intervalo.wav`
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(href), 5000)
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setExportingRange(false)
+    }
   }
 
   return <main className="app-shell studio-shell">
@@ -1575,7 +1700,7 @@ export default function App() {
       </details>
       {selectedTrack && selectedTrack.kind !== 'midi' && <details className="punch-controls">
         <summary>Punch e gravação em loop</summary>
-        <form onSubmit={(event) => {
+        <form key={range ? `${range.start}:${range.end}` : 'default-punch'} onSubmit={(event) => {
           event.preventDefault()
           if (!canEditTimeline || asioBusy || isMetronome || !selectedTrack.armed) return
           const fields = new FormData(event.currentTarget)
@@ -1597,8 +1722,8 @@ export default function App() {
           void toggleRecording(undefined, false, false, { start, end, preRoll, passes })
         }}>
           <fieldset disabled={!canEditTimeline || asioBusy || isMetronome}>
-            <label>Início (s) <input name="start" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={0} required /></label>
-            <label>Fim (s) <input name="end" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={2} required /></label>
+            <label>Início (s) <input name="start" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={(range?.start ?? 0) / project.audioSampleRate} required /></label>
+            <label>Fim (s) <input name="end" type="number" min={0} max={timelineFrames / project.audioSampleRate} step="any" defaultValue={range ? range.end / project.audioSampleRate : 2} required /></label>
             <label>Pré-roll do punch (s) <input name="preRoll" type="number" min={0} max={30} step="any" defaultValue={1} required /></label>
             <label>Passagens no loop <input name="passes" type="number" min={2} max={8} step={1} defaultValue={3} required /></label>
             <button type="submit" className="button record-action" disabled={!selectedTrack.armed}>Gravar punch</button>
@@ -1658,6 +1783,7 @@ export default function App() {
     {view === 'tracks' && <section className="track-area">
       <div className="timeline-tools">
         <div className="track-area-actions"><button className="button secondary" onClick={addTrack}>＋ Áudio</button><button className="button secondary" onClick={addMidiTrack}>＋ MIDI</button><button className="button secondary" onClick={() => fileInputRef.current?.click()}>↥ Importar</button>
+          <button type="button" className="button secondary" onClick={() => navigatorDialog.current?.showModal()}>Pistas e clipes</button>
           {selectedTrack?.inactive ? <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy}
             onClick={() => updateTrack(selectedTrack.id, (track) => ({ ...track, inactive: false }))}>Reativar pista</button>
             : selectedTrack && <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy ||
@@ -1666,8 +1792,12 @@ export default function App() {
               onClick={() => void commitTrack(selectedTrack, project)}>Renderizar pista</button>}
         </div>
         <div className="timeline-zoom">
-          <label>Régua <select aria-label="Unidade da régua" value={rulerMode} onChange={(event) => setRulerMode(event.target.value === 'bars' ? 'bars' : 'time')}>
+          <label>Régua <select aria-label="Unidade da régua" value={rulerMode} onChange={(event) => {
+            const value = event.target.value
+            setRulerMode(value === 'bars' || value === 'samples' || value === 'timecode' ? value : 'time')
+          }}>
             <option value="time">Minutos e segundos</option><option value="bars">Compassos</option>
+            <option value="samples">Amostras</option><option value="timecode">Timecode · 30 fps</option>
           </select></label>
           <label>Compasso <select aria-label="Fórmula de compasso" value={project.timeSignature} disabled={!canEditTimeline} onChange={(event) => {
             const value = event.target.value as TimeSignature
@@ -1690,7 +1820,31 @@ export default function App() {
           </select></label>
         </div>
       </div>
-      <div className="timeline-viewport">
+      <details className="timeline-range">
+        <summary>Intervalo</summary>
+        <form key={range ? `${range.start}:${range.end}` : 'no-range'} onSubmit={(event) => {
+          event.preventDefault()
+          const fields = new FormData(event.currentTarget)
+          const start = Number(fields.get('from'))
+          const end = Number(fields.get('to'))
+          if (!canEditTimeline || ![start, end].every(Number.isSafeInteger) || start < 0 || end <= start || end > timelineFrames) {
+            setToast({ tone: 'error', text: 'Informe um fim maior que o início dentro da timeline.' })
+            return
+          }
+          setEditRange({ projectId: project.id, start, end })
+        }}>
+          <label>Início em amostras <input name="from" type="number" min={0} max={timelineFrames - 1} step={1} defaultValue={range?.start ?? 0} required /></label>
+          <label>Fim em amostras <input name="to" type="number" min={1} max={timelineFrames} step={1} defaultValue={range?.end ?? project.audioSampleRate} required /></label>
+          <button type="submit" className="button secondary" disabled={!canEditTimeline}>Marcar intervalo</button>
+        </form>
+        {range && <div className="range-actions">
+          <button type="button" className="button secondary" disabled={!canEditTimeline} onClick={() => seekTimeline(range.start)}>Ir ao início</button>
+          <button type="button" className="button secondary" disabled={!canEditTimeline || asioBusy || exportingRange}
+            onClick={() => void exportRange()}>{exportingRange ? 'Exportando…' : 'Exportar intervalo WAV'}</button>
+          <button type="button" className="button secondary" disabled={!canEditTimeline} onClick={() => setEditRange(undefined)}>Limpar intervalo</button>
+        </div>}
+      </details>
+      <div className="timeline-viewport" ref={timelineViewport}>
       <div className="timeline-grid" style={{
         '--timeline-zoom': timelineZoom,
         '--major-grid': `${rulerMode === 'bars' || snapToBeat ? barFrames * barStep / timelineFrames * 100 : 25 / timelineZoom}%`,
@@ -1713,8 +1867,10 @@ export default function App() {
           return <span key={bar} style={{ left: `${bar * barFrames / timelineFrames * 100}%` }}>{bar + 1}</span>
         }) : Array.from({ length: timelineZoom * 4 + 1 }, (_, division) => {
           const fraction = division / (timelineZoom * 4)
-          const label = formatDuration(timelineFrames * fraction, project.audioSampleRate)
-          return <span key={division} style={{ left: `${fraction * 100}%` }}>{label.replace(/\.0$/, '')}</span>
+          const samples = Math.round(timelineFrames * fraction)
+          const label = rulerMode === 'samples' ? samples.toLocaleString('pt-BR')
+            : rulerMode === 'timecode' ? formatTimecode(samples, project.audioSampleRate) : formatDuration(samples, project.audioSampleRate).replace(/\.0$/, '')
+          return <span key={division} style={{ left: `${fraction * 100}%` }}>{label}</span>
         })}
       </div>
       <div className="marker-lane">
@@ -1722,6 +1878,7 @@ export default function App() {
           title={marker.name} style={{ left: `${marker.frame / timelineFrames * 100}%` }} onClick={() => seekTimeline(marker.frame)}>{marker.name}</button>)}
       </div>
       {project.tracks.map((track, index) => <article key={track.id} data-track-id={track.id}
+        hidden={track.hiddenInTimeline} data-track-height={track.timelineHeight ?? 'normal'}
         className={`track-row ${selectedTrack?.id === track.id ? 'selected' : ''} ${draggedTrackId === track.id ? 'dragging' : ''} ${dropTrackId === track.id && draggedTrackId !== track.id ? 'track-drop-target' : ''}`}
         style={{ '--track-color': track.color } as React.CSSProperties}
         onClick={() => { if (!isRecording) setSelectedTrackId(track.id) }}>
@@ -1777,11 +1934,14 @@ export default function App() {
             <Waveform peaks={recordingPeaks[track.id]} color={track.color} /><small>Capturando ao vivo</small>
           </div>}
           {visibleClipsByTrack.get(track.id)?.map((clip) => <TimelineClip key={clip.id} clip={clip} asset={activeAssetById.get(clip.assetId)}
-            color={track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil' && !clip.positionLocked}
+            color={clip.color ?? track.color} timelineFrames={timelineFrames} snapFrames={snapToBeat ? gridFrames : undefined} tool={clipTool === 'trim' ? 'trim' : 'move'} selected={selectedClipId === clip.id} editable={canEditTimeline && clipTool !== 'pencil' && !clip.positionLocked}
             onSelect={selectTimelineClip} onEdit={editTimelineClip} />)}
         </div>
       </article>)}
-      <div className="playhead-overlay" aria-hidden="true"><i className="lane-playhead" style={{ left: playheadPosition }} /></div>
+      <div className="playhead-overlay" aria-hidden="true">
+        {range && <span className="timeline-range-overlay" style={{ left: `${range.start / timelineFrames * 100}%`, width: `${(range.end - range.start) / timelineFrames * 100}%` }} />}
+        <i className="lane-playhead" style={{ left: playheadPosition }} />
+      </div>
       </div></div>
       <form className="marker-form" onSubmit={(event) => {
         event.preventDefault()
@@ -1807,6 +1967,11 @@ export default function App() {
           onChange={(automation) => updateTrack(selectedTrack.id, (track) => ({ ...track, automation }))} />
       </details>}
       {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span>
+        <label className="fade-control">Cor do clipe<input type="color" disabled={!canEditTimeline}
+          value={selectedClip.color ?? selectedTrack?.color ?? '#20a7ff'} onChange={(event) => {
+            const color = event.target.value
+            updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, color } : clip) }))
+          }} /></label>
         <button type="button" aria-pressed={Boolean(selectedClip.positionLocked)} disabled={!canEditTimeline} onClick={() =>
           updateProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, positionLocked: !clip.positionLocked } : clip) }))
         }>{selectedClip.positionLocked ? 'Desbloquear posição' : 'Bloquear posição'}</button>
@@ -1912,6 +2077,25 @@ export default function App() {
 
     {view === 'project' && <section className="project-view"><div className="view-intro"><div><span className="eyebrow">PROJETO LOCAL</span><h2>Estado e compatibilidade</h2><p>Esta sessão não envia áudio para servidores. O salvamento é local ao navegador.</p></div></div><div className="diagnostic-grid"><article><small>MOTOR DE ÁUDIO</small><strong>{capabilities ? 'Ativo após gesto' : 'Aguardando ativação'}</strong><p>{capabilities ? `${capabilities.sampleRate.toLocaleString('pt-BR')} Hz efetivos · AudioWorklet ${capabilities.audioWorklet ? 'disponível' : 'indisponível'}` : 'Toque em “Ativar áudio” antes de importar, tocar, gravar ou exportar.'}</p></article><article><small>ARMAZENAMENTO</small><strong>{storage?.persistent ? 'Persistente concedido' : 'Local do navegador'}</strong><p>{storage?.quota ? `${Math.round((storage.usage ?? 0) / 1024 / 1024)} MB usados de aproximadamente ${Math.round(storage.quota / 1024 / 1024)} MB.` : 'A cota será consultada no dispositivo.'}</p><button className="link-button" onClick={() => void projectRepository.requestPersistentStorage().then(() => projectRepository.getStorageEstimate()).then(setStorage)}>Solicitar persistência</button></article><article><small>MONITORAMENTO</small><strong>{selectedTrack?.monitorMode === 'software' ? 'Software ativado' : selectedTrack?.monitorMode === 'direct' ? 'Direto selecionado' : 'Sem retorno'}</strong><p>“Sincronia” ajusta a posição do take. Não elimina a latência física ao ouvir a própria voz.</p></article><article><small>ATUALIZAÇÃO</small><strong>{updateReady ? isRecording ? 'Pronta após o take' : 'Nova versão pronta' : 'Sem atualização pendente'}</strong><p>{updateReady ? 'O projeto é salvo e a nova versão só assume quando você confirmar.' : 'Nenhuma sessão em andamento é substituída automaticamente.'}</p>{updateReady && <button className="link-button" onClick={() => void applyPendingUpdate()} disabled={isRecording}>{isRecording ? 'Finalize o take' : 'Salvar e atualizar'}</button>}</article></div><div className="calibration-panel"><div><span className="eyebrow">ALINHAMENTO</span><h3>Compensação manual de posição</h3><p>Aplica um offset em frames aos próximos takes. Use somente um valor medido; o loopback automático e a validação de drift continuam pendentes.</p></div><RangeControl label="Offset de captura" value={project.calibrationFrames} min={-9600} max={9600} step={1} suffix=" frames" onChange={(value) => updateProject((current) => ({ ...current, calibrationFrames: Math.round(value) }))} /><button className="link-button" onClick={() => updateProject((current) => ({ ...current, calibrationFrames: 0 }))}>Zerar ajuste</button></div>{takeDrafts.length > 0 && <div className="recovery-panel"><div><span className="eyebrow">RECUPERAÇÃO</span><h3>{takeDrafts.length} rascunho{takeDrafts.length === 1 ? '' : 's'} de gravação encontrado{takeDrafts.length === 1 ? '' : 's'}</h3><p>Trechos PCM confirmados durante uma gravação que não chegou ao commit final. Recupere-os como um novo take ou descarte-os explicitamente.</p></div>{takeDrafts.map((draft) => <article key={draft.id}><div><strong>{project.tracks.find((track) => track.id === draft.trackId)?.name ?? 'Pista removida'}</strong><small>{draft.persistedChunks} checkpoints · {formatDuration(draft.persistedFrames, draft.sampleRate)} confirmados</small></div><div><button className="button secondary" onClick={() => void recoverTakeDraft(draft)}>Recuperar</button><button className="link-button destructive-link" onClick={() => void discardTakeDraft(draft)}>Descartar</button></div></article>)}</div>}<div className="export-panel backup-panel"><div><span className="eyebrow">CONTINUIDADE</span><h3>Proteja a sessão inteira.</h3><p>O backup inclui a estrutura do projeto e todos os áudios locais. Ao restaurar, ele sempre cria uma cópia sem substituir a sessão original.</p></div><div><button className="button secondary" onClick={() => archiveInputRef.current?.click()} disabled={Boolean(archiving)}>{archiving === 'import' ? 'Restaurando…' : 'Restaurar .valestudio'}</button><button className="button primary" onClick={() => void exportBackup()} disabled={Boolean(archiving)}>{archiving === 'export' ? 'Criando backup…' : 'Backup .valestudio'}</button></div></div><div className="export-panel"><div><span className="eyebrow">EXPORTAÇÃO</span><h3>Renderize a mixagem ou stems locais.</h3><p>WAV é PCM estéreo; MP3 usa encoder MPEG Layer III. Stems entram em um ZIP, todos alinhados desde 00:00 e com a mesma duração.</p></div><div><button className="button secondary" onClick={() => void exportMix('wav')} disabled={Boolean(exporting)}>{exporting === 'wav' ? 'Gerando WAV…' : 'WAV 24-bit'}</button><button className="button secondary" onClick={() => void exportStems()} disabled={Boolean(exporting)}>{exporting === 'stems' ? 'Renderizando stems…' : 'Stems WAV (.zip)'}</button><button className="button primary" onClick={() => void exportMix('mp3')} disabled={Boolean(exporting)}>{exporting === 'mp3' ? 'Codificando MP3…' : 'MP3 192 kbps'}</button></div></div><div className="danger-zone"><button className="button secondary" onClick={() => { if (window.confirm(`Excluir “${project.name}” e seus assets locais? Esta ação não pode ser desfeita.`)) { void projectRepository.removeProject(project).then(() => { setProject(undefined); void projectRepository.listProjects().then(setProjects) }) } }}>Excluir projeto local</button></div></section>}
 
+    <dialog ref={navigatorDialog} className="routing-dialog" aria-labelledby="navigator-title">
+      <header><h2 id="navigator-title">Pistas e clipes</h2><form method="dialog"><button className="icon-button" aria-label="Fechar navegador">×</button></form></header>
+      <TimelineNavigator tracks={project.tracks}
+        clips={project.tracks.flatMap((track) => (visibleClipsByTrack.get(track.id) ?? []).map((clip) => ({
+          clip, name: activeAssetById.get(clip.assetId)?.name ?? 'Clipe gravado', trackName: track.name,
+        })))}
+        selectedTrack={selectedTrack} rate={project.audioSampleRate} editable={canEditTimeline}
+        onTrack={(track) => { setSelectedTrackId(track.id); setSelectedClipId(undefined) }}
+        onClip={locateClip} onSettings={(changes) => {
+          if (selectedTrack && canEditTimeline) updateTrack(selectedTrack.id, (track) => ({ ...track, ...changes }))
+        }} />
+      <div className="navigator-file-actions">
+        <input ref={midiFileInputRef} className="sr-only" type="file" accept=".mid,.midi,audio/midi" onChange={importMidi} />
+        <button type="button" className="button secondary" disabled={!canEditTimeline}
+          onClick={() => { midiFileInputRef.current?.click(); navigatorDialog.current?.close() }}>Importar MIDI</button>
+        <button type="button" className="button secondary" disabled={!project.tracks.some((track) => !track.inactive && track.kind === 'midi' && track.midiNotes?.length)}
+          onClick={() => exportMidi(project)}>Exportar MIDI</button>
+      </div>
+    </dialog>
     <dialog ref={renderTrackDialog} className="routing-dialog" aria-labelledby="render-track-title" onCancel={(event) => event.preventDefault()}>
       <h2 id="render-track-title">Renderizando pista</h2>
       <progress aria-label="Renderização da pista em andamento" />
@@ -1973,18 +2157,34 @@ function EffectCard({ title, active, onToggle, children }: { title: string; acti
 function Vst3CatalogInsert({ plugins, track, onInsert }: { plugins: Vst3Plugin[]; track?: Track; onInsert: (plugin: Vst3Plugin) => void }) {
   const [query, setQuery] = useState('')
   const [selectedKey, setSelectedKey] = useState('')
-  const matches = plugins.filter((plugin) => (track?.kind === 'midi' || plugin.kind !== 'instrument')
-    && `${plugin.name} ${plugin.vendor}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const [filter, setFilter] = useState('all')
+  const favoritesKey = 'vale-studio:vst3-favorites'
+  const [favorites, setFavorites] = useState(() => readVst3List(favoritesKey).filter((value): value is string => typeof value === 'string'))
   const keyOf = (plugin: Vst3Plugin) => `${plugin.bundlePath}:${plugin.classId}`
+  const matches = plugins.filter((plugin) => (track?.kind === 'midi' || plugin.kind !== 'instrument')
+    && (filter === 'all' || plugin.kind === filter || (filter === 'favorites' && favorites.includes(keyOf(plugin))))
+    && `${plugin.name} ${plugin.vendor}`.toLowerCase().includes(query.trim().toLowerCase()))
   const selectedPlugin = matches.find((plugin) => keyOf(plugin) === selectedKey) ?? matches[0]
   return <div className="plugin-picker">
     <input type="search" aria-label="Filtrar plugins VST3" placeholder="Buscar por nome ou fabricante" value={query} onChange={(event) => setQuery(event.target.value)} />
+    <label>Mostrar <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+      <option value="all">Todos</option><option value="effect">Efeitos</option>
+      {track?.kind === 'midi' && <option value="instrument">Instrumentos</option>}
+      <option value="favorites">Favoritos</option>
+    </select></label>
     <div className="vst3-picker-actions">
       <select aria-label="Plug-in VST3 para inserir" value={selectedPlugin ? keyOf(selectedPlugin) : ''} disabled={!selectedPlugin} onChange={(event) => setSelectedKey(event.target.value)}>
         {!selectedPlugin && <option value="">Nenhum plugin encontrado</option>}
         {matches.map((plugin) => <option key={keyOf(plugin)} value={keyOf(plugin)}>{plugin.name} · {plugin.vendor || 'VST3'}</option>)}
       </select>
       <button className="button primary" disabled={!selectedPlugin} onClick={() => { if (selectedPlugin) onInsert(selectedPlugin) }}>Inserir no projeto</button>
+      {selectedPlugin && <button className="button secondary" type="button" aria-pressed={favorites.includes(keyOf(selectedPlugin))}
+        onClick={() => {
+          const key = keyOf(selectedPlugin)
+          const next = favorites.includes(key) ? favorites.filter((favorite) => favorite !== key) : [...favorites, key]
+          setFavorites(next)
+          storeVst3List(favoritesKey, next)
+        }}>{favorites.includes(keyOf(selectedPlugin)) ? 'Remover favorito' : 'Favoritar'}</button>}
     </div>
     <p>Os inserts ativos processam o áudio no Desktop. Reinicie a reprodução após mudar a cadeia.</p>
   </div>

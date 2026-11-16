@@ -23,6 +23,7 @@ function NoteFields({ note }: { note?: MidiNote }) {
     <label>Posição (tempos) <input name="start" type="number" min={1} step="any" defaultValue={beatLabel(note?.startBeat ?? 0)} required /></label>
     <label>Duração (tempos) <input name="duration" type="number" min={0.001} step="any" defaultValue={Number((note?.durationBeats ?? 1).toFixed(6))} required /></label>
     <label>Velocidade <input name="velocity" type="number" min={1} max={127} step={1} defaultValue={note?.velocity ?? 100} required /></label>
+    <label>Canal MIDI <input name="channel" type="number" min={1} max={16} step={1} defaultValue={(note?.channel ?? 0) + 1} required /></label>
   </>
 }
 
@@ -62,13 +63,16 @@ export function MidiEditor({ notes, cursorBeat, disabled, onChange }: Props) {
     const fields = new FormData(event.currentTarget)
     const note = Number(fields.get('note'))
     const velocity = Number(fields.get('velocity'))
+    const channel = Number(fields.get('channel')) - 1
     const start = Number(fields.get('start'))
     const duration = Number(fields.get('duration'))
     if (!Number.isInteger(note) || note < 0 || note > 127 || !Number.isInteger(velocity) || velocity < 1 || velocity > 127 ||
+      !Number.isInteger(channel) || channel < 0 || channel > 15 ||
       !Number.isFinite(start) || start < 1 || !Number.isFinite(duration) || duration < 0.001) return
     const next: MidiNote = {
       id: selected?.id ?? crypto.randomUUID(),
       note,
+      channel,
       velocity,
       startBeat: Math.round((start - 1) * TICKS_PER_BEAT) / TICKS_PER_BEAT,
       durationBeats: Math.max(1, Math.round(duration * TICKS_PER_BEAT)) / TICKS_PER_BEAT,

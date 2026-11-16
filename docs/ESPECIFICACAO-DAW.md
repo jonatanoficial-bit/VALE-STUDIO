@@ -33,6 +33,11 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 
 ## Evidência inicial e ordem
 
+- O navegador de pistas e clipes busca por nome, localiza clipes na régua e permite renomear pistas, escolher sua altura e ocultá-las na timeline. A visibilidade da pista é independente da mixagem. Clipe e pista podem ter cores próprias.
+- As réguas incluem amostras e timecode fixo a 30 fps. Um intervalo em amostras preenche os limites de punch e loop e pode ser exportado como mixagem WAV estéreo de 24 bits.
+- A importação MIDI lê notas de arquivos tipo 0 ou 1 com divisão PPQN. Um projeto criado a partir de um MIDI adota o BPM e o compasso inicial, nos valores suportados. Um projeto aberto mantém seu tempo. A exportação escreve tipo 1 com notas, canais, BPM e compasso. Mapas de tempo, CC e outros eventos ainda estão pendentes. [Standard MIDI Files](https://midi.org/standard-midi-files)
+- O Desktop abre o último catálogo VST3 descoberto enquanto faz nova varredura e permite filtrar efeitos, instrumentos e favoritos locais.
+
 - A edição permite posicionar um clipe por amostras e bloquear seu deslocamento, trim, divisão e remoção. O bloqueio acompanha o projeto no backup.
 - Em Pistas, **Renderizar pista** gera um clipe WAV estéreo a partir dos clipes audíveis ou notas MIDI, com os VST3 ativos. A nova pista herda volume, pan, efeitos internos, automação e roteamento. A pista original fica inativa, preservando MIDI, takes e inserts, e pode ser reativada. O congelamento reversível no mesmo canal e a compensação integral de latência dos plugins seguem pendentes.
 

@@ -1,5 +1,5 @@
 export type MidiDevice = { id: string; name: string }
-export type MidiMessage = { type: 'noteon' | 'noteoff'; note: number; velocity: number }
+export type MidiMessage = { type: 'noteon' | 'noteoff'; note: number; velocity: number; channel: number }
 
 type MidiPort = {
   id: string
@@ -35,7 +35,7 @@ export class MidiInput {
       const note = event.data[1]
       const velocity = event.data[2] ?? 0
       if (note === undefined || (status !== 0x90 && status !== 0x80)) return
-      onMessage({ type: status === 0x80 || velocity === 0 ? 'noteoff' : 'noteon', note, velocity })
+      onMessage({ type: status === 0x80 || velocity === 0 ? 'noteoff' : 'noteon', note, velocity, channel: event.data[0] & 15 })
     }
     refresh()
     return devices
