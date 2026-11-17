@@ -219,7 +219,9 @@ void encode(BYTE* data, Sample sample, float value) {
 }
 
 class CaptureRing {
-  static constexpr uint32_t capacity = 65536;
+  // Capture-only reserve for scheduler and pipe stalls. The monitor uses its
+  // own queue, so this capacity does not increase the live monitoring delay.
+  static constexpr uint32_t capacity = 1048576;
   std::array<float, capacity> data {};
   std::atomic<uint32_t> head {0}, tail {0};
 public:
