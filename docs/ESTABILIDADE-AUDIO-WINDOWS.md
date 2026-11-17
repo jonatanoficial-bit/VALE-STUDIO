@@ -48,6 +48,12 @@ O diagnóstico inicial fica encerrado com esse resultado. Para uma configuraçã
 
 Quando o host nativo encerra uma captura inesperadamente, a interface finaliza a gravação e tenta gravar os frames recebidos como takes alternativos em uma transação. A seleção anterior é preservada. Se a transação falhar, os checkpoints confirmados continuam acessíveis em **Projeto → Recuperação**. O app aproveita o diagnóstico escrito pelo host para identificar a causa quando disponível.
 
+### Verificação do MSI 0.1.12
+
+- A captura com cabo virtual passou por 610,49 segundos. O app salvou dois takes mono alinhados, de 26.922.609 frames a 44.100 Hz. Os oito sinais da base foram confirmados nos segundos 1, 60, 300 e 598. A análise encontrou zero janelas de 10 ms abaixo do nível de silêncio do teste entre os segundos 1 e 601. A medição de latência em hardware permanece pendente.
+- O encerramento forçado do host WASAPI do perfil de teste preservou automaticamente dois takes alternativos alinhados, de 425.124 frames a 44.100 Hz, com os oito sinais esperados.
+- A varredura e o processamento do EZdrummer 3 produziram sinal no host VST3. Reason Rack Plugin e Kontakt abriram e devolveram blocos silenciosos na configuração de teste. A varredura do Kontakt 7 excedeu 15 segundos.
+
 A captura no TEYUN Q26 entregou 73.440 frames em mono e 71.040 em estéreo a 48 kHz, com período de 480 frames e buffer de 1.056 frames. Em loopback pelo cabo virtual, o host reproduziu um sinal estéreo de dois segundos a 48 kHz e capturou a 44,1 kHz. O RMS medido foi 0,0892 à esquerda e 0,0223 à direita, compatível com a razão de 4:1 do sinal enviado.
 
 O diagnóstico de saída manteve o fluxo de silêncio por 300 segundos, a 48 kHz, com período de 480 e buffer de 1.056 frames. Foram observados 30.002 eventos e um evento com preenchimento zero. A reprodução de um sinal estéreo de cinco minutos no mesmo cabo virtual entregou 14.400.000 frames em 29.997 eventos, com um evento de preenchimento zero. Esse contador descreve o preenchimento do buffer. A medição completa de XRUNs, a avaliação audível em uma saída física e os testes de desconexão e overdub seguem pendentes.
