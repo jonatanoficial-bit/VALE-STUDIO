@@ -4,6 +4,7 @@ import { clipIsAudible } from '../domain/comp'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
 import { createDynamics, DEFAULT_GATE, DEFAULT_LIMITER, loadDynamics, setDynamics } from './dynamics'
+import { analyzeClipPcm } from './clipAnalysis'
 import { finishAsioCapture, isDesktopRuntime, MAX_WASAPI_BACKING_FRAMES, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings, type WasapiCaptureStats } from '../platform/desktop'
 
 type VstNote = { frame: number; note: number; velocity: number; channel: number }
@@ -285,6 +286,12 @@ export class AudioEngine {
       // A one-shot source may already have ended.
     }
     this.previewSource = undefined
+  }
+
+  analyzeClip(clip: Clip, rate: number) {
+    const buffer = this.assetBuffers.get(clip.assetId)
+    if (!buffer) throw new Error('O áudio do clipe ainda não foi carregado.')
+    return analyzeClipPcm(buffer, rate, clip.sourceOffsetFrame, clip.durationFrames, clip.gainDb)
   }
 
   cacheAsset(id: string, buffer: AudioBuffer): void {

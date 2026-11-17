@@ -321,6 +321,12 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .timeline-range input { width: 118px; }
 .timeline-range-overlay { position: absolute; inset-block: 0; background: #27c3ff22; border-inline: 1px solid #27c3ff; }
 .routing-dialog.master-limiter { width: min(440px, calc(100vw - 28px)); }
+.clip-analysis { display: grid; gap: 14px; }
+.clip-analysis section { border-top: 1px solid #294258; padding-top: 10px; }
+.clip-analysis h3 { margin: 0 0 6px; font-size: 15px; }
+.clip-analysis label { display: grid; grid-template-columns: 1fr auto; gap: 5px; font-size: 12px; margin-block: 6px; }
+.clip-analysis label input { grid-column: 1 / -1; width: 100%; accent-color: #29c8ff; }
+.clip-analysis-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .timeline-grid .audio-clip small { top: 2px; color: #071925; font-weight: 700; }
 .timeline-grid .audio-clip polygon { fill: color-mix(in srgb, var(--clip-color) 55%, #0a1c30); }
 .timeline-grid .midi-roll { border-radius: 0; background: repeating-linear-gradient(0deg, #bbc4ce66 0 8px, #54677e38 8px 9px); }

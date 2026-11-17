@@ -8,6 +8,9 @@ import { AutomationEditor, AutomationModeSelect } from './audio/AutomationEditor
 import { isAutomationWriter } from './audio/automation'
 import { AuxRouting } from './audio/AuxRouting'
 import { buildPeaks } from './audio/peaks'
+import { ClipAnalysisPanel } from './audio/ClipAnalysisPanel'
+import type { ClipAnalysis, ClipRegion } from './audio/clipAnalysis'
+import { clipsWithoutSilence } from './domain/stripSilence'
 import { encodeWav } from './audio/wav'
 import { createZip } from './audio/zip'
 import type { AudioProject, AutomationLane, AuxBus, Clip, EffectSettings, MediaAsset, MidiNote, MonitorMode, TimeSignature, Track, TrackAutomation, Vst3Insert } from './domain/model'
@@ -353,6 +356,8 @@ export default function App() {
   const timelineViewport = useRef<HTMLDivElement>(null)
   const renderTrackDialog = useRef<HTMLDialogElement>(null)
   const limiterDialog = useRef<HTMLDialogElement>(null)
+  const clipAnalysisDialog = useRef<HTMLDialogElement>(null)
+  const [clipAnalysis, setClipAnalysis] = useState<{ clipId: string; data: ClipAnalysis }>()
   const newTrackDialog = useRef<HTMLDialogElement>(null)
   const firstFadeInput = useRef<HTMLInputElement>(null)
   const [fadeFocusRequest, setFadeFocusRequest] = useState(0)
@@ -1680,6 +1685,36 @@ export default function App() {
     }
   }
 
+  function openClipAnalysis(clip: Clip) {
+    if (!project || !canEditTimeline || asioBusy || recordTransition.current) return
+    try {
+      setClipAnalysis({ clipId: clip.id, data: engineRef.current.analyzeClip(clip, project.audioSampleRate) })
+      clipAnalysisDialog.current?.showModal()
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  function stripClip(clip: Clip, regions: ClipRegion[]) {
+    if (!canEditTimeline || !project || clip.positionLocked) return
+    const pieces = clipsWithoutSilence(clip, regions, project.audioSampleRate, makeId)
+    if (!pieces.length || (pieces.length === 1 && pieces[0].durationFrames === clip.durationFrames)) {
+      setToast({ tone: 'info', text: 'Os fades do clipe ocupam o silêncio detectado.' })
+      clipAnalysisDialog.current?.close()
+      return
+    }
+    updateProject((current) => ({
+      ...current,
+      clips: current.clips.flatMap((item) => item.id === clip.id ? pieces : [item]),
+      tracks: current.tracks.map((item) => item.id === clip.trackId ? {
+        ...item, clipIds: item.clipIds.flatMap((id) => id === clip.id ? pieces.map((piece) => piece.id) : [id]),
+      } : item),
+    }))
+    setSelectedClipId(pieces[0].id)
+    clipAnalysisDialog.current?.close()
+    setToast({ tone: 'success', text: `Silêncio separado em ${pieces.length} trecho(s).` })
+  }
+
   return <main className="app-shell studio-shell">
     <header className="studio-header">
       <div className="studio-transport-row">
@@ -2019,6 +2054,7 @@ export default function App() {
           onChange={(automation) => updateTrack(selectedTrack.id, (track) => ({ ...track, automation }))} />
       </details>}
       {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span>
+        <button type="button" disabled={!canEditTimeline || asioBusy} onClick={() => openClipAnalysis(selectedClip)}>Analisar clipe</button>
         <label className="fade-control">Cor do clipe<input type="color" disabled={!canEditTimeline}
           value={selectedClip.color ?? selectedTrack?.color ?? '#20a7ff'} onChange={(event) => {
             const color = event.target.value
@@ -2151,6 +2187,21 @@ export default function App() {
         <button type="button" className="button secondary" disabled={!project.tracks.some((track) => !track.inactive && track.kind === 'midi' && track.midiNotes?.length)}
           onClick={() => exportMidi(project)}>Exportar MIDI</button>
       </div>
+    </dialog>
+    <dialog ref={clipAnalysisDialog} className="routing-dialog" aria-labelledby="clip-analysis-title" onClose={() => setClipAnalysis(undefined)}>
+      <header><h2 id="clip-analysis-title">Análise do clipe</h2><form method="dialog"><button className="icon-button" aria-label="Fechar análise">×</button></form></header>
+      {clipAnalysis && selectedClip?.id === clipAnalysis.clipId && <ClipAnalysisPanel key={selectedClip.id}
+        analysis={clipAnalysis.data} clipStart={selectedClip.timelineStartFrame} cursor={playhead} editable={canEditTimeline} canStrip={!selectedClip.positionLocked}
+        onSeek={seekTimeline}
+        onMark={(frames) => {
+          updateProject((current) => {
+            const existing = new Set(current.markers?.map((marker) => marker.frame))
+            return { ...current, markers: [...(current.markers ?? []), ...frames.filter((frame) => !existing.has(frame))
+              .map((frame, index) => ({ id: makeId(), frame, name: `Transiente ${index + 1}` }))] }
+          })
+          clipAnalysisDialog.current?.close()
+        }}
+        onStrip={(regions) => stripClip(selectedClip, regions)} />}
     </dialog>
     <dialog ref={limiterDialog} className="routing-dialog master-limiter" aria-labelledby="master-limiter-title">
       <header><h2 id="master-limiter-title">Limiter master</h2><form method="dialog"><button className="icon-button" aria-label="Fechar limiter">×</button></form></header>
