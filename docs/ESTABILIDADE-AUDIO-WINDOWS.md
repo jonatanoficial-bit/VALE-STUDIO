@@ -46,6 +46,8 @@ O diagnóstico inicial fica encerrado com esse resultado. Para uma configuraçã
 
 ## Primeira verificação do WASAPI Shared
 
+Quando o host nativo encerra uma captura inesperadamente, a interface finaliza a gravação e tenta gravar os frames recebidos como takes alternativos em uma transação. A seleção anterior é preservada. Se a transação falhar, os checkpoints confirmados continuam acessíveis em **Projeto → Recuperação**. O app aproveita o diagnóstico escrito pelo host para identificar a causa quando disponível.
+
 A captura no TEYUN Q26 entregou 73.440 frames em mono e 71.040 em estéreo a 48 kHz, com período de 480 frames e buffer de 1.056 frames. Em loopback pelo cabo virtual, o host reproduziu um sinal estéreo de dois segundos a 48 kHz e capturou a 44,1 kHz. O RMS medido foi 0,0892 à esquerda e 0,0223 à direita, compatível com a razão de 4:1 do sinal enviado.
 
 O diagnóstico de saída manteve o fluxo de silêncio por 300 segundos, a 48 kHz, com período de 480 e buffer de 1.056 frames. Foram observados 30.002 eventos e um evento com preenchimento zero. A reprodução de um sinal estéreo de cinco minutos no mesmo cabo virtual entregou 14.400.000 frames em 29.997 eventos, com um evento de preenchimento zero. Esse contador descreve o preenchimento do buffer. A medição completa de XRUNs, a avaliação audível em uma saída física e os testes de desconexão e overdub seguem pendentes.

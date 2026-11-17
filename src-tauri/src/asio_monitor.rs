@@ -94,6 +94,7 @@ impl Drop for WasapiOutput {
 struct Session {
     child: Child,
     diagnostics: mpsc::Receiver<String>,
+    last_diagnostic: Option<String>,
     capture: Option<Arc<Mutex<CaptureQueue>>>,
     capture_done: mpsc::Receiver<()>,
     wasapi: bool,
@@ -221,10 +222,15 @@ impl Session {
         false
     }
 
-    fn error(&self, fallback: &str) -> String {
-        self.diagnostics
-            .recv_timeout(Duration::from_millis(150))
-            .ok()
+    fn diagnostic(&mut self, wait: Duration) -> Option<&str> {
+        if self.last_diagnostic.is_none() {
+            self.last_diagnostic = self.diagnostics.recv_timeout(wait).ok();
+        }
+        self.last_diagnostic.as_deref()
+    }
+
+    fn error(&mut self, fallback: &str, wait: Duration) -> String {
+        self.diagnostic(wait)
             .map(|message| message.lines().filter(|line| !line.starts_with("VALE_WASAPI_STATS ")).collect::<Vec<_>>().join("\n"))
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| fallback.to_owned())
@@ -297,7 +303,7 @@ pub async fn wasapi_devices(app: AppHandle) -> Result<Vec<WasapiDevice>, String>
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None) if start.elapsed() < Duration::from_secs(5) => thread::sleep(Duration::from_millis(20)),
+                Ok(None) if start.elapsed() < Duration::from_secs(12) => thread::sleep(Duration::from_millis(20)),
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -517,7 +523,7 @@ async fn start_monitor(
             let _ = stderr.take(8192).read_to_string(&mut message);
             let _ = error_tx.send(message.trim().to_owned());
         });
-        let mut session = Session { child, diagnostics, capture, capture_done, wasapi };
+        let mut session = Session { child, diagnostics, last_diagnostic: None, capture, capture_done, wasapi };
         let sent = duplex.map(|mut output| {
             let mut stdin = session.child.stdin.take().expect("stdin redirecionado");
             let (sender, receiver) = mpsc::channel();
@@ -532,7 +538,7 @@ async fn start_monitor(
         });
         let info = match ready_rx.recv_timeout(Duration::from_secs(if sent.is_some() { 30 } else { 5 })) {
             Ok(Ok(info)) if info.callbacks > 0 && info.frames > 0 && info.channels == channels && info.sample_rate.is_finite() && info.sample_rate > 0.0 => info,
-            _ => return Err(session.error(if wasapi { "O WASAPI não confirmou blocos de áudio." } else { "O ASIO4ALL não confirmou blocos de áudio." })),
+            _ => return Err(session.error(if wasapi { "O WASAPI não confirmou blocos de áudio." } else { "O ASIO4ALL não confirmou blocos de áudio." }, Duration::from_millis(150))),
         };
         if let Some(sent) = sent {
             let (stdin, result) = sent.recv_timeout(Duration::from_millis(500)).map_err(|_| "A saída WASAPI não recebeu a base.")?;
@@ -551,12 +557,17 @@ pub fn read_asio_capture(app: AppHandle, binary: Option<bool>) -> Result<tauri::
     let state = app.state::<Monitor>();
     let mut current = state.0.lock().map_err(|_| "Estado ASIO indisponível.")?;
     let session = current.as_mut().ok_or("Nenhuma captura ASIO está aberta.")?;
-    let ended = session.child.try_wait().map_err(|error| error.to_string())?.is_some();
+    let exit = session.child.try_wait().map_err(|error| error.to_string())?;
+    let exit_detail = exit.map(|status| {
+        let backend = if session.wasapi { "WASAPI" } else { "ASIO" };
+        session.error(&format!("O host {backend} encerrou a captura ({status})."), Duration::ZERO)
+    });
     let capture = session.capture.as_ref().ok_or("O host ASIO está no modo de retorno.")?;
     let mut queue = capture.lock().map_err(|_| "Fila de captura ASIO indisponível.")?;
     // The stdout reader can still have buffered bytes after child exit.
     let mut packet = queue.drain(32768, false);
-    packet.ended = ended;
+    packet.ended = exit.is_some();
+    packet.error = packet.error.or(exit_detail);
     packet.into_response(binary.unwrap_or(false))
 }
 
@@ -574,10 +585,13 @@ pub async fn finish_asio_capture(app: AppHandle, binary: Option<bool>) -> Result
         let capture = session.capture.as_ref().expect("fila de captura verificada");
         let mut queue = capture.lock().map_err(|_| "Fila de captura ASIO indisponível.")?;
         let mut packet = queue.drain(usize::MAX, true);
+        drop(queue);
         if packet.error.is_none() && (!stopped || !drained) {
-            packet.error = Some(session.error("A captura ASIO não foi encerrada normalmente."));
-        } else if stopped && drained && session.wasapi {
-            packet.wasapi = session.diagnostics.recv_timeout(Duration::from_millis(150)).ok().and_then(|message| {
+            let backend = if session.wasapi { "WASAPI" } else { "ASIO" };
+            packet.error = Some(session.error(&format!("A captura {backend} não foi encerrada normalmente."), Duration::from_millis(150)));
+        }
+        if drained && session.wasapi {
+            packet.wasapi = session.diagnostic(Duration::from_millis(150)).and_then(|message| {
                 message.lines().find_map(|line| {
                     serde_json::from_str(line.strip_prefix("VALE_WASAPI_STATS ")?).ok()
                 })
@@ -612,8 +626,8 @@ pub async fn asio_monitor_running(app: AppHandle) -> Result<bool, String> {
         if session.child.try_wait().map_err(|error| error.to_string())?.is_none() {
             return Ok(true);
         }
-        let session = current.take().expect("sessão em execução");
-        Err(session.error("O retorno ASIO foi interrompido."))
+        let mut session = current.take().expect("sessão em execução");
+        Err(session.error("O retorno ASIO foi interrompido.", Duration::from_millis(150)))
     })
     .await
     .map_err(|error| error.to_string())?

@@ -46,6 +46,7 @@ export type AudioCapabilities = {
 }
 
 export type CapturedRecording = {
+  interruption?: string
   buffers: AudioBuffer[]
   frames: number
   channels: number
@@ -1153,7 +1154,6 @@ export class AudioEngine {
     await this.durableWrite
     try {
       if (flushError) throw new Error(flushError)
-      if (capture?.error) throw new Error(capture.error)
       const channels = this.recordingChannels
       const frames = this.recordingChunks.reduce((total, chunk) => total + chunk.length / channels, 0)
       const sampleRate = capture?.rate ?? this.context.sampleRate
@@ -1172,6 +1172,7 @@ export class AudioEngine {
       }
       return {
         buffers,
+        interruption: capture?.error,
         frames,
         channels,
         sampleRate,

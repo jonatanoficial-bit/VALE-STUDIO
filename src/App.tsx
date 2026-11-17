@@ -310,6 +310,7 @@ export default function App() {
   const [isStarting, setIsStarting] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [punchEnded, setPunchEnded] = useState(false)
+  const [nativeCaptureEnded, setNativeCaptureEnded] = useState(false)
   const [isMetronome, setIsMetronome] = useState(false)
   const [playhead, setPlayhead] = useState(0)
   const [inputPeak, setInputPeak] = useState<number>()
@@ -388,15 +389,15 @@ export default function App() {
   }, [project])
   const activeProjectId = project?.id
   const desktopRuntime = isDesktopRuntime()
-  const finishPunch = useEffectEvent(() => { void toggleRecording() })
+  const finishCapture = useEffectEvent(() => { void toggleRecording() })
 
   useEffect(() => {
     if (isRecording) document.querySelector<HTMLElement>('#studio-recording:popover-open')?.hidePopover()
   }, [isRecording])
 
   useEffect(() => {
-    if (isRecording && punchEnded) finishPunch()
-  }, [isRecording, punchEnded])
+    if (isRecording && (punchEnded || nativeCaptureEnded)) finishCapture()
+  }, [isRecording, punchEnded, nativeCaptureEnded])
 
   useEffect(() => {
     const dialog = trackDialog.current
@@ -1100,13 +1101,14 @@ export default function App() {
         setIsRecording(false)
         setAsioRecording(false)
         setPunchEnded(false)
+        setNativeCaptureEnded(false)
         activeDraftRef.current = undefined
       }
       if (!captured || captured.frames < 128) {
         if (activeDraft) await projectRepository.discardTakeDraft(activeDraft.id).catch(() => undefined)
         if (activeDraft?.secondary) await projectRepository.discardTakeDraft(activeDraft.secondary.id).catch(() => undefined)
         for (const id of activeDraft?.loop?.ids.slice(1) ?? []) await projectRepository.discardTakeDraft(id).catch(() => undefined)
-        const detail = activeDraft?.punch && punchInterrupted.current
+        const detail = captured?.interruption ?? (activeDraft?.punch && punchInterrupted.current)
         setToast({ tone: 'error', text: detail ? `${detail} Nenhum take foi confirmado.` : 'Nenhum frame de áudio foi confirmado. O take não foi salvo.' })
         return
       }
@@ -1117,7 +1119,7 @@ export default function App() {
       const range = activeDraft.punch
       const loop = activeDraft.loop
       const compPunch = Boolean(range && !loop)
-      const interrupted = range && punchInterrupted.current
+      const interrupted = captured.interruption ?? (range && punchInterrupted.current)
       const startFrame = range?.start ?? Math.max(0, engineRef.current.getRecordingStartFrame() + project.calibrationFrames)
       const recording = captured
       if (recording.wasapi) setWasapiStats(recording.wasapi)
@@ -1258,7 +1260,7 @@ export default function App() {
       }
       const recording = asio
         ? await engineRef.current.startAsioRecording(recordTrack.id, project.audioSampleRate, asio, dryReturn, channels, persistChunk,
-          (reason) => setToast({ tone: 'error', text: `${reason} Encerre a gravação para recuperar os trechos confirmados.` }), backing)
+          () => setNativeCaptureEnded(true), backing)
         : await engineRef.current.startRecording(recordTrack.id, project, recordTrack.monitorMode, channels, persistChunk, punch && {
           ...punch, onEnd: (failed, reason) => {
             punchInterrupted.current = failed ? reason ?? 'A gravação foi interrompida.' : undefined
