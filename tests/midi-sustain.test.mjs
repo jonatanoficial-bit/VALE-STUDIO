@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { Sustain } from '../src/midi/Sustain.ts'
+import { build } from 'vite'
+
+const result = await build({
+  configFile: false, publicDir: false, logLevel: 'silent',
+  build: { write: false, lib: { entry: 'src/midi/Sustain.ts', formats: ['es'] } },
+})
+const [{ code }] = result[0].output
+const { Sustain } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`)
 
 test('sustain adia note-off somente no canal do pedal e libera ao soltar', () => {
   const events = []
