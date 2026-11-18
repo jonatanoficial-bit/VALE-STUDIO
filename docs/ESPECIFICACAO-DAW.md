@@ -33,6 +33,8 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 
 ## Evidência inicial e ordem
 
+- A entrada MIDI interpreta sustain CC64 por canal. O note-off é adiado até a liberação do pedal, e a gravação preserva essa duração. CC120 e CC123 encerram as notas do canal. Trocar de pista, desconectar o controlador ou usar **Encerrar notas MIDI** libera as notas ativas. Pitch bend continua pendente no host VST3.
+
 - Em **Pistas → Analisar clipe**, o Vale Studio mede picos em janelas de 5 ms sobre o PCM da mídia. É possível navegar para ataques e criar marcadores. A separação de silêncio usa limiar, duração mínima e margem configuráveis. Os trechos reaproveitam a mesma mídia, conservam o alinhamento e recebem fades curtos nas novas bordas.
 
 - O mixer oferece limiter estéreo no master com teto de pico por amostra e release. O gate por pista oferece limiar, atenuação e release. A reprodução e a renderização usam o mesmo AudioWorklet. A sessão guarda as configurações e abre projetos anteriores com ambos em bypass.

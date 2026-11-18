@@ -413,7 +413,11 @@ export default function App() {
     projectRef.current = project
     if (project) engineRef.current.updateMix(project)
   }, [project])
-  useEffect(() => { selectedTrackIdRef.current = selectedTrackId }, [selectedTrackId])
+  useEffect(() => {
+    midiRef.current.panic()
+    engineRef.current.stopMidiNotes()
+    selectedTrackIdRef.current = selectedTrackId
+  }, [selectedTrackId])
   useEffect(() => { recordingRef.current = isRecording }, [isRecording])
   useEffect(() => () => { midiRef.current.disconnect(); engineRef.current.stopMidiNotes() }, [])
 
@@ -997,6 +1001,7 @@ export default function App() {
   }
 
   function finishMidiNotes() {
+    midiRef.current.panic()
     const current = projectRef.current
     const trackId = selectedTrackIdRef.current
     if (!current || !trackId) return
@@ -1778,7 +1783,13 @@ export default function App() {
             }}>
               <option value={1}>Mono</option><option value={2}>Estéreo</option>
             </select></label>}
-            {selectedTrack?.kind === 'midi' && <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>}
+            {selectedTrack?.kind === 'midi' && <>
+              <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>
+              <button type="button" className="button secondary" onClick={() => {
+                midiRef.current.panic()
+                engineRef.current.stopMidiNotes()
+              }}>Encerrar notas MIDI</button>
+            </>}
             {selectedTrack && <button className="button secondary" disabled={isRecording || selectedTrack.inactive} aria-pressed={selectedTrack.armed} onClick={() => updateTrack(selectedTrack.id, (current) => ({ ...current, armed: !current.armed }))}>{selectedTrack.armed ? 'Desarmar' : 'Armar pista'}</button>}
           </div>
         </div>
