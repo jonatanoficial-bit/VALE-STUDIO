@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { AUTOMATION_MODES, type AutomationLane, type AutomationMode, type TrackAutomation } from '../domain/model'
+import { AUTOMATION_MODES, type AutomationLane, type SendAutomationLane, type AutomationMode, type TrackAutomation } from '../domain/model'
 
 const LIMITS = {
   gainDb: { min: -60, max: 6, step: 0.5, label: 'Volume (dB)' },
   pan: { min: -1, max: 1, step: 0.05, label: 'Panorama' },
+  sendReverb: { min: 0, max: 1, step: 0.01, label: 'Send Reverb (0–1)' },
+  sendDelay: { min: 0, max: 1, step: 0.01, label: 'Send Delay (0–1)' },
 }
 
 type Props = {
   automation?: TrackAutomation
-  defaults: { gainDb: number; pan: number }
+  defaults: { gainDb: number; pan: number; sends?: { reverb: number; delay: number } }
   playhead: number
   frames: number
   rate: number
@@ -29,12 +31,13 @@ export function AutomationModeSelect({ mode, disabled, label = 'Modo', onChange 
 }
 
 export function AutomationEditor({ automation, defaults, playhead, frames, rate, disabled, onChange }: Props) {
-  const [lane, setLane] = useState<AutomationLane>('gainDb')
+  const [lane, setLane] = useState<AutomationLane | SendAutomationLane>('gainDb')
   const [pointFrame, setPointFrame] = useState<number>()
   const points = automation?.[lane] ?? []
   const selected = points.find((point) => point.frame === pointFrame)
   const cursor = selected?.frame ?? playhead
   const limit = LIMITS[lane]
+  const initial = lane === 'sendReverb' ? defaults.sends?.reverb ?? 0 : lane === 'sendDelay' ? defaults.sends?.delay ?? 0 : defaults[lane]
 
   function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -44,7 +47,7 @@ export function AutomationEditor({ automation, defaults, playhead, frames, rate,
     const value = Number(fields.get('value'))
     if (!Number.isSafeInteger(frame) || frame < 0 || frame > frames || !Number.isFinite(value) || value < limit.min || value > limit.max) return
     const updated = points.filter((point) => point.frame !== selected?.frame && point.frame !== frame)
-    onChange({ mode: 'read', ...automation, [lane]: [...updated, { frame, value }].sort((a, b) => a.frame - b.frame) })
+    onChange({ ...automation, mode: !automation?.mode || automation.mode === 'off' ? 'read' : automation.mode, [lane]: [...updated, { frame, value }].sort((a, b) => a.frame - b.frame) })
     setPointFrame(frame)
   }
 
@@ -53,11 +56,12 @@ export function AutomationEditor({ automation, defaults, playhead, frames, rate,
     <div className="automation-options">
       <AutomationModeSelect mode={automation?.mode} disabled={disabled} onChange={(mode) => onChange({ ...automation, mode })} />
       <label>Parâmetro <select value={lane} onChange={(event) => {
-        setLane(event.target.value === 'pan' ? 'pan' : 'gainDb')
+        setLane(event.target.value as AutomationLane | SendAutomationLane)
         setPointFrame(undefined)
-      }}><option value="gainDb">Volume</option><option value="pan">Panorama</option></select></label>
+      }}><option value="gainDb">Volume</option><option value="pan">Panorama</option><option value="sendReverb">Send Reverb</option><option value="sendDelay">Send Delay</option></select></label>
       {selected && <button className="button secondary" type="button" onClick={() => setPointFrame(undefined)}>Novo ponto</button>}
     </div>
+    {(lane === 'sendReverb' || lane === 'sendDelay') && <small>Sends: edição por pontos e leitura da curva em todos os modos, exceto Off. Para controle manual, use Off ou remova os pontos.</small>}
     <div className="automation-lane">
       {points.length > 1 && <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <polyline fill="none" stroke="#53c5ef" vectorEffect="non-scaling-stroke"
@@ -71,7 +75,7 @@ export function AutomationEditor({ automation, defaults, playhead, frames, rate,
     <form onSubmit={save} key={`${lane}-${cursor}-${selected?.value ?? ''}`}>
       <fieldset disabled={disabled}>
         <label>Posição (s) <input type="number" name="seconds" min={0} max={frames / rate} step="any" defaultValue={Number((cursor / rate).toFixed(6))} required /></label>
-        <label>{limit.label} <input type="number" name="value" min={limit.min} max={limit.max} step={limit.step} defaultValue={selected?.value ?? defaults[lane]} required /></label>
+        <label>{limit.label} <input type="number" name="value" min={limit.min} max={limit.max} step={limit.step} defaultValue={selected?.value ?? initial} required /></label>
         <button className="button primary" type="submit">{selected ? 'Aplicar ao ponto' : 'Adicionar ponto'}</button>
         {selected && <button className="button secondary" type="button" onClick={() => {
           if (!automation) return

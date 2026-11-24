@@ -1,10 +1,11 @@
 export type TimeSignature = '2/4' | '3/4' | '4/4' | '6/8' | '12/8'
 export type MonitorMode = 'off' | 'software' | 'direct'
 export type AutomationLane = 'gainDb' | 'pan'
+export type SendAutomationLane = 'sendReverb' | 'sendDelay'
 export type AutomationPoint = { frame: number; value: number }
 export const AUTOMATION_MODES = ['off', 'read', 'write', 'touch', 'latch'] as const
 export type AutomationMode = typeof AUTOMATION_MODES[number]
-export type TrackAutomation = { mode: AutomationMode; gainDb?: AutomationPoint[]; pan?: AutomationPoint[] }
+export type TrackAutomation = { mode: AutomationMode; gainDb?: AutomationPoint[]; pan?: AutomationPoint[]; sendReverb?: AutomationPoint[]; sendDelay?: AutomationPoint[] }
 export type AuxBus = { id: string; name: string; gainDb: number; mute: boolean }
 export type AuxSend = { busId: string; level: number; tap?: 'pre' | 'post'; pan?: number; mute?: boolean }
 export const MAX_AUX_SENDS = 10

@@ -1,6 +1,6 @@
 [package]
 name = "vale-studio-desktop"
-version = "0.1.15"
+version = "0.1.16"
 description = "Vale Studio Desktop"
 authors = ["Vale Studio"]
 edition = "2021"

@@ -48,6 +48,18 @@ export function scheduleAutomation(param: AudioParam, points: AutomationPoint[],
 
 type LanePass = { active?: AutomationPoint[]; completed: AutomationPoint[][] }
 
+/** Send curves are read in every non-Off mode; live gesture writing stays on volume/pan. */
+export function scheduleSendAutomation(param: AudioParam, track: Track, bus: 'reverb' | 'delay',
+  frame: number, rate: number, at: number, changed: boolean): void {
+  const points = track.automation?.mode !== 'off' ? track.automation?.[bus === 'reverb' ? 'sendReverb' : 'sendDelay'] : undefined
+  if (points?.length) {
+    if (changed) scheduleAutomation(param, points, frame, rate, at, identity)
+  } else {
+    if (changed) param.cancelScheduledValues(at)
+    param.setTargetAtTime(Math.max(0, Math.min(1, track.sends?.[bus] ?? 0)), at, 0.015)
+  }
+}
+
 export class AutomationPass {
   private tracks = new Map<string, { track: Track; lanes: Record<AutomationLane, LanePass> }>()
 

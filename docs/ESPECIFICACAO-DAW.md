@@ -81,3 +81,7 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 Build Windows x64 concluído no GitHub Actions, execução 45420223545, commit 40e48a2. Lint, 40 testes e auditoria de contratos passaram localmente; testes e build passaram também no CI. O MSI foi extraído pelo Windows Installer em perfil isolado. A interface criou oito pistas pelo modelo Banda, persistiu Solo Safe e comentário após reabrir a sessão e exportou um tom em WAV mono 24 bits, 48.000 frames a 48 kHz, pico 0,244148. Não foram repetidos nesta versão testes prolongados de áudio, latência física ou compatibilidade de todos os VST3.
 
 MSI SHA-256: B4984F70A4157B1CC1E0D88A156062F8D316065C72D3B61767205A6599871990.
+
+## Automação de sends — 0.1.16
+
+Em Pistas → Automação da pista, os parâmetros Send Reverb e Send Delay aceitam pontos entre 0 e 1. As curvas são lidas na reprodução, mixagem, stems e base preparada para WASAPI; buscar no meio da curva retoma seu valor interpolado. Off restaura o nível manual. Mute e Solo continuam atuando no fader anterior aos sends. Gravação gestual Write/Touch/Latch de sends e automação dos auxiliares personalizados ainda não estão implementadas; nesses modos, os sends apenas leem os pontos existentes. As curvas acompanham sessão/backup. Automação de volume/pan preserva as curvas de send.

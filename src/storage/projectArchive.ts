@@ -124,7 +124,8 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     if (item?.automation !== undefined) {
       const automation = asRecord(item.automation)
       if (!automation || !AUTOMATION_MODES.some((mode) => mode === automation.mode) ||
-        !validAutomationLane(automation.gainDb, -60, 6) || !validAutomationLane(automation.pan, -1, 1)) return true
+        !validAutomationLane(automation.gainDb, -60, 6) || !validAutomationLane(automation.pan, -1, 1) ||
+        !validAutomationLane(automation.sendReverb, 0, 1) || !validAutomationLane(automation.sendDelay, 0, 1)) return true
     }
     const effectSettings = asRecord(item?.effects)
     if (!validDynamics(effectSettings?.gate, [['thresholdDb', -80, 0], ['depthDb', -80, 0], ['releaseMs', 10, 1000]])) return true

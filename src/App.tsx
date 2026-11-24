@@ -227,6 +227,7 @@ const TimelineClip = memo(function TimelineClip({ clip, asset, color, timelineFr
 
 function TrackSends({ track, onChange }: { track: Track; onChange: (bus: 'reverb' | 'delay', level: number) => void }) {
   return <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
+    {track.automation?.mode !== 'off' && Boolean(track.automation?.sendReverb?.length || track.automation?.sendDelay?.length) && <small>Curva ativa na reprodução. Edite em Pistas → Automação da pista.</small>}
     {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'}
       value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => onChange(bus, value / 100)} />)}
   </div>
@@ -2136,6 +2137,7 @@ export default function App() {
         <PeakHold value={heldPeak(track.id)} onReset={() => resetPeak(track.id)} />
         <div className="channel-sends" aria-label={`Sends de ${track.name}`}>
           <small>SENDS</small>
+          {track.automation?.mode !== 'off' && Boolean(track.automation?.sendReverb?.length || track.automation?.sendDelay?.length) && <small>Automação de send ativa · editar em Pistas</small>}
           {(['reverb', 'delay'] as const).map((bus) => <RangeControl key={bus} label={bus === 'reverb' ? 'Reverb' : 'Delay'} value={Math.round((track.sends?.[bus] ?? 0) * 100)} min={0} max={100} suffix="%" onChange={(value) => updateTrack(track.id, (current) => ({ ...current, sends: { reverb: 0, delay: 0, ...current.sends, [bus]: value / 100 } }))} />)}
         </div><div className="strip-toggles">
           <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording || track.inactive} onClick={() => updateTrack(track.id, (item) => ({ ...item, armed: !item.armed }))} />

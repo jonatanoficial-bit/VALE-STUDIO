@@ -2,7 +2,7 @@ import type { AudioProject, AutomationLane, Clip, MonitorMode, Track, TrackAutom
 import { dbToGain, DEFAULT_VST_BUFFER_FRAMES, trackIsMuted } from '../domain/model'
 import { clipIsAudible } from '../domain/comp'
 import { encodeMp3, encodeWav } from './wav'
-import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
+import { AutomationPass, automationValueAt, scheduleAutomation, scheduleSendAutomation } from './automation'
 import { createDynamics, DEFAULT_GATE, DEFAULT_LIMITER, loadDynamics, setDynamics } from './dynamics'
 import { analyzeClipPcm } from './clipAnalysis'
 import { finishAsioCapture, isDesktopRuntime, MAX_WASAPI_BACKING_FRAMES, openVstStream, readAsioCapture, startAsioMonitor, startWasapiDuplex, type NativeCaptureSettings, type WasapiCaptureStats } from '../platform/desktop'
@@ -441,7 +441,7 @@ export class AudioEngine {
     const sends = { reverb: context.createGain(), delay: context.createGain() }
     for (const bus of ['reverb', 'delay'] as const) {
       sends[bus].gain.value = sendLevel(track.sends?.[bus])
-      if (live || sends[bus].gain.value > 0) fader.connect(sends[bus]).connect(buses[bus])
+      fader.connect(sends[bus]).connect(buses[bus])
     }
 
     return { highPass, gate, eq, compressor, reverbGain, delayGain, delay, fader, panner, analyser, sends }
@@ -473,6 +473,7 @@ export class AudioEngine {
         param.setTargetAtTime(isGain && muted ? 0 : convert(live ?? track[lane]), at, 0.015)
       }
     }
+    for (const bus of ['reverb', 'delay'] as const) scheduleSendAutomation(graph.sends[bus].gain, track, bus, frame, rate, at, changed)
     graph.automationState = { settings: automation, muted, values }
   }
 
@@ -903,7 +904,7 @@ export class AudioEngine {
       const graph = this.liveGraphs.get(track.id)
       if (!graph) return
       for (const bus of ['reverb', 'delay'] as const) {
-        graph.sends[bus].gain.setTargetAtTime(sendLevel(track.sends?.[bus]), at, 0.015)
+        if (!this.playing) graph.sends[bus].gain.setTargetAtTime(sendLevel(track.sends?.[bus]), at, 0.015)
       }
       graph.highPass.frequency.setTargetAtTime(track.effects.highPassEnabled ? track.effects.highPassHz : 10, at, 0.015)
       if (graph.gate) setDynamics(graph.gate, { mode: 'gate', settings: track.effects.gate ?? DEFAULT_GATE }, at)
