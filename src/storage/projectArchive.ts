@@ -101,6 +101,8 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     const item = asRecord(track)
     if (item?.compEnabled !== undefined && typeof item.compEnabled !== 'boolean') return true
     if (item?.inactive !== undefined && typeof item.inactive !== 'boolean') return true
+    if (item?.soloSafe !== undefined && typeof item.soloSafe !== 'boolean') return true
+    if (item?.comment !== undefined && (typeof item.comment !== 'string' || item.comment.length > 1000)) return true
     if (item?.hiddenInTimeline !== undefined && typeof item.hiddenInTimeline !== 'boolean') return true
     if (item?.timelineHeight !== undefined && !['compact', 'normal', 'large'].includes(String(item.timelineHeight))) return true
     if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true

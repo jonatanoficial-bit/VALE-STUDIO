@@ -33,6 +33,8 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 
 ## Evidência inicial e ordem
 
+- Versão 0.1.15: cinco modelos iniciais em Novo projeto (voz, acústico, banda, produção MIDI e podcast), comentários por pista no navegador Pistas e clipes e Solo Safe no navegador/mixer. Solo Safe participa da reprodução e renderização, respeitando mute e inativação. Exportar clipe WAV gera 24 bits com corte, ganho e fades do clipe, sem efeitos/sends/fader da pista. Instrumentos dos modelos começam sem plugin; o usuário escolhe um VST3 instalado em Inserts. Não representa a conclusão das áreas marcadas como parciais nesta matriz.
+
 - A entrada MIDI interpreta sustain CC64 por canal. O note-off é adiado até a liberação do pedal, e a gravação preserva essa duração. CC120 e CC123 encerram as notas do canal. Trocar de pista, desconectar o controlador ou usar **Encerrar notas MIDI** libera as notas ativas. Pitch bend continua pendente no host VST3.
 
 - Em **Pistas → Analisar clipe**, o Vale Studio mede picos em janelas de 5 ms sobre o PCM da mídia. É possível navegar para ataques e criar marcadores. A separação de silêncio usa limiar, duração mínima e margem configuráveis. Os trechos reaproveitam a mesma mídia, conservam o alinhamento e recebem fades curtos nas novas bordas.

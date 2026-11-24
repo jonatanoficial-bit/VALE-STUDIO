@@ -1,5 +1,5 @@
 import type { AudioProject, AutomationLane, Clip, MonitorMode, Track, TrackAutomation } from '../domain/model'
-import { dbToGain, DEFAULT_VST_BUFFER_FRAMES } from '../domain/model'
+import { dbToGain, DEFAULT_VST_BUFFER_FRAMES, trackIsMuted } from '../domain/model'
 import { clipIsAudible } from '../domain/comp'
 import { encodeMp3, encodeWav } from './wav'
 import { AutomationPass, automationValueAt, scheduleAutomation } from './automation'
@@ -412,7 +412,7 @@ export class AudioEngine {
     const panner = context.createStereoPanner()
     panner.pan.value = track.pan
     const fader = context.createGain()
-    const shouldMute = track.mute || (soloActive && !track.solo)
+    const shouldMute = trackIsMuted(track, soloActive)
     fader.gain.value = shouldMute ? 0 : dbToGain(track.gainDb)
 
     const equalized = live || track.effects.eq?.enabled
@@ -503,7 +503,7 @@ export class AudioEngine {
     const track = project.tracks.find((item) => item.id === trackId)
     const graph = this.liveGraphs.get(trackId)
     if (!active || !track || !graph || !this.context) return
-    const muted = track.mute || (!track.solo && project.tracks.some((item) => item.solo && !item.inactive))
+    const muted = trackIsMuted(track, project.tracks.some((item) => item.solo && !item.inactive))
     this.applyTrackAutomation(graph, track, muted, this.getCurrentFrame(active.rate), active.rate,
       Math.max(this.context.currentTime, this.playStartedAt), active.pass)
   }
@@ -815,7 +815,7 @@ export class AudioEngine {
     this.automationPlayback = { pass, rate: project.audioSampleRate }
     for (const track of activeTracks) {
       const graph = this.liveGraphs.get(track.id)!
-      this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), startFrame, project.audioSampleRate, startAt, pass)
+      this.applyTrackAutomation(graph, track, trackIsMuted(track, soloActive), startFrame, project.audioSampleRate, startAt, pass)
       if (graph.instrument) graph.instrument.port.postMessage({
         type: 'events',
         events: this.vstEvents(track, project.bpm, from, startAt, context.sampleRate),
@@ -913,7 +913,7 @@ export class AudioEngine {
       graph.reverbGain.gain.setTargetAtTime(track.effects.reverbEnabled ? track.effects.reverbMix : 0, at, 0.015)
       graph.delayGain.gain.setTargetAtTime(track.effects.delayEnabled ? track.effects.delayMix : 0, at, 0.015)
       graph.delay.delayTime.setTargetAtTime(track.effects.delayTime, at, 0.015)
-      if (this.playing) this.applyTrackAutomation(graph, track, track.mute || (soloActive && !track.solo), this.getCurrentFrame(project.audioSampleRate), project.audioSampleRate, Math.max(at, this.playStartedAt), this.automationPlayback?.pass)
+      if (this.playing) this.applyTrackAutomation(graph, track, trackIsMuted(track, soloActive), this.getCurrentFrame(project.audioSampleRate), project.audioSampleRate, Math.max(at, this.playStartedAt), this.automationPlayback?.pass)
     })
   }
 
@@ -1314,7 +1314,7 @@ export class AudioEngine {
     const master = offline.createGain()
     master.gain.value = masterLevel(project)
     const soloActive = project.tracks.some((track) => track.solo && !track.inactive)
-    const tracks = project.tracks.filter((track) => !track.inactive && !track.mute && (!soloActive || track.solo))
+    const tracks = project.tracks.filter((track) => !trackIsMuted(track, soloActive))
     if (project.masterLimiter?.enabled || tracks.some((track) => track.effects.gate?.enabled)) await loadDynamics(offline)
     if (project.masterLimiter?.enabled) master.connect(createDynamics(offline, { mode: 'limiter', settings: project.masterLimiter })).connect(offline.destination)
     else master.connect(offline.destination)

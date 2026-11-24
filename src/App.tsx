@@ -1,3 +1,4 @@
+import { applySessionTemplate, SESSION_TEMPLATES, type SessionTemplate } from './domain/templates'
 import { ChangeEvent, memo, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { AudioEngine, type AudioCapabilities, type RecordingPcmChunk } from './audio/AudioEngine'
 import type { NativeCaptureSettings, WasapiCaptureStats } from './platform/desktop'
@@ -272,13 +273,14 @@ function MixAutomationControl({ track, lane, playing, value, onValue, onRelease 
     onPointerUp={onRelease} onPointerCancel={onRelease} onLostPointerCapture={onRelease} onKeyUp={onRelease} onBlur={onRelease} />
 }
 
-function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm: number, signature: TimeSignature) => void; onCancel: () => void }) {
+function NewProjectDialog({ onCreate, onCancel }: { onCreate: (name: string, bpm: number, signature: TimeSignature, template: SessionTemplate) => void; onCancel: () => void }) {
   const [name, setName] = useState('Minha nova música')
+  const [template, setTemplate] = useState<SessionTemplate>('blank')
   const [bpm, setBpm] = useState(100)
   const [signature, setSignature] = useState<TimeSignature>('4/4')
-  return <div className="dialog-backdrop" role="presentation"><form className="dialog" onSubmit={(event) => { event.preventDefault(); onCreate(name.trim() || 'Minha nova música', bpm, signature) }}>
+  return <div className="dialog-backdrop" role="presentation"><form className="dialog" onSubmit={(event) => { event.preventDefault(); onCreate(name.trim() || 'Minha nova música', bpm, signature, template) }}>
     <div className="dialog-kicker">NOVO PROJETO</div><h2>Comece do seu jeito.</h2><p>Configurações simples agora. Você pode ajustar o tempo depois.</p>
-    <label>Nome<input autoFocus value={name} onChange={(event) => setName(event.target.value)} maxLength={60} /></label>
+    <label>Modelo<select value={template} onChange={(event) => setTemplate(event.target.value as SessionTemplate)}>{Object.entries(SESSION_TEMPLATES).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label><small>Instrumentos MIDI começam sem plugin. Escolha o instrumento em Inserts.</small><label>Nome<input autoFocus value={name} onChange={(event) => setName(event.target.value)} maxLength={60} /></label>
     <div className="form-row"><label>BPM<input type="number" min="40" max="240" value={bpm} onChange={(event) => setBpm(Math.max(40, Math.min(240, Number(event.target.value) || 100)))} /></label><label>Compasso<select value={signature} onChange={(event) => setSignature(event.target.value as TimeSignature)}>{(['2/4', '3/4', '4/4', '6/8', '12/8'] as TimeSignature[]).map((value) => <option key={value}>{value}</option>)}</select></label></div>
     <div className="dialog-actions"><button className="button secondary" type="button" onClick={onCancel}>Cancelar</button><button className="button primary" type="submit">Criar projeto</button></div>
   </form></div>
@@ -773,9 +775,9 @@ export default function App() {
     }
   }
 
-  async function createNewProject(name: string, bpm: number, signature: TimeSignature) {
+  async function createNewProject(name: string, bpm: number, signature: TimeSignature, template: SessionTemplate) {
     const audio = await activateAudio()
-    const next = createProject(name, audio?.sampleRate ?? 48000)
+    const next = applySessionTemplate(createProject(name, audio?.sampleRate ?? 48000), template)
     next.bpm = bpm
     next.timeSignature = signature
     setProject(next)
@@ -1626,6 +1628,27 @@ export default function App() {
     })
   }
 
+  async function exportSelectedClip() {
+    if (!project || !selectedClip || exportingRange || !canEditTimeline || asioBusy) return
+    const session = project
+    const clip = selectedClip
+    setExportingRange(true)
+    try {
+      const audio = capabilities ?? await activateAudio()
+      if (!audio) return
+      const buffer = await engineRef.current.renderClipSelection(session, [clip], clip.timelineStartFrame, clip.timelineStartFrame + clip.durationFrames)
+      const href = URL.createObjectURL(encodeWav(buffer, 24))
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = safeFilePart(session.assets.find((asset) => asset.id === clip.assetId)?.name ?? 'clipe', 'clipe') + '-editado.wav'
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(href), 5000)
+      setToast({ tone: 'success', text: 'Clipe exportado com ganho e fades, sem efeitos da pista.' })
+    } catch (error) {
+      setToast({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally { setExportingRange(false) }
+  }
+
   async function exportRange() {
     if (!range || exportingRange || !canEditTimeline || asioBusy || !project) return
     const session = project
@@ -2064,7 +2087,7 @@ export default function App() {
           playhead={playhead} frames={timelineFrames} rate={project.audioSampleRate} disabled={!canEditTimeline}
           onChange={(automation) => updateTrack(selectedTrack.id, (track) => ({ ...track, automation }))} />
       </details>}
-      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span>
+      {selectedClip && <div className="edit-sheet"><span>Clipe selecionado</span><button type="button" disabled={!canEditTimeline || asioBusy || exportingRange} title="WAV 24 bits com ganho e fades do clipe, sem efeitos da pista" onClick={() => void exportSelectedClip()}>{exportingRange ? 'Exportando…' : 'Exportar clipe WAV'}</button>
         <button type="button" disabled={!canEditTimeline || asioBusy} onClick={() => openClipAnalysis(selectedClip)}>Analisar clipe</button>
         <label className="fade-control">Cor do clipe<input type="color" disabled={!canEditTimeline}
           value={selectedClip.color ?? selectedTrack?.color ?? '#20a7ff'} onChange={(event) => {
@@ -2118,7 +2141,7 @@ export default function App() {
           <Toggle pressed={track.armed} label="R" title="Armar pista" danger disabled={isRecording || track.inactive} onClick={() => updateTrack(track.id, (item) => ({ ...item, armed: !item.armed }))} />
           {track.kind !== 'midi' && <Toggle pressed={track.monitorMode !== 'off'} label="I" title="Monitoramento de entrada" onClick={() => cycleMonitor(track)} />}
           <Toggle pressed={track.mute} label="M" onClick={() => updateTrack(track.id, (item) => ({ ...item, mute: !item.mute }))} />
-          <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (item) => ({ ...item, solo: !item.solo }))} />
+          <Toggle pressed={track.solo} label="S" onClick={() => updateTrack(track.id, (item) => ({ ...item, solo: !item.solo }))} /><Toggle pressed={Boolean(track.soloSafe)} label="SAFE" title="Solo Safe: manter audível quando outra pista está em solo; Mute continua valendo" onClick={() => updateTrack(track.id, (item) => ({ ...item, soloSafe: !item.soloSafe }))} />
         </div></article>)}
         {(project.auxBuses ?? []).map((bus) => <article className="channel-strip aux-strip" key={bus.id}>
           <strong>Auxiliar</strong>

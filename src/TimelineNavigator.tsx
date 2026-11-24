@@ -9,7 +9,7 @@ type Props = {
   editable: boolean
   onTrack: (track: Track) => void
   onClip: (clip: Clip) => void
-  onSettings: (changes: Pick<Partial<Track>, 'name' | 'hiddenInTimeline' | 'timelineHeight'>) => void
+  onSettings: (changes: Pick<Partial<Track>, 'name' | 'hiddenInTimeline' | 'timelineHeight' | 'comment' | 'soloSafe'>) => void
 }
 
 export function TimelineNavigator({ tracks, clips, selectedTrack, rate, editable, onTrack, onClip, onSettings }: Props) {
@@ -59,6 +59,15 @@ export function TimelineNavigator({ tracks, clips, selectedTrack, rate, editable
       </select></label>
       <label><input type="checkbox" checked={!selectedTrack.hiddenInTimeline}
         onChange={(event) => onSettings({ hiddenInTimeline: !event.target.checked })} /> Mostrar na timeline</label>
+      <label><input type="checkbox" checked={Boolean(selectedTrack.soloSafe)}
+        onChange={(event) => onSettings({ soloSafe: event.target.checked })} /> Solo Safe · manter audível ao solar outra pista</label>
+      <form key={`comment-${selectedTrack.id}`} onSubmit={(event) => {
+        event.preventDefault()
+        onSettings({ comment: String(new FormData(event.currentTarget).get('comment') ?? '').trim() })
+      }}>
+        <label>Comentário da pista<textarea name="comment" defaultValue={selectedTrack.comment ?? ''} maxLength={1000} rows={3} /></label>
+        <button type="submit" className="button secondary">Salvar comentário</button>
+      </form>
     </fieldset>}
   </div>
 }

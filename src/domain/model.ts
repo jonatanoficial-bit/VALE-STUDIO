@@ -104,6 +104,8 @@ export type Track = {
   auxSends?: AuxSend[]
   mute: boolean
   solo: boolean
+  soloSafe?: boolean
+  comment?: string
   armed: boolean
   monitorMode: MonitorMode
   recordChannels?: 1 | 2
@@ -208,6 +210,10 @@ export function createProject(name: string, sampleRate = 48000): AudioProject {
 
 export function dbToGain(value: number): number {
   return Math.pow(10, value / 20)
+}
+
+export function trackIsMuted(track: Track, soloActive: boolean): boolean {
+  return Boolean(track.inactive || track.mute || (soloActive && !track.solo && !track.soloSafe))
 }
 
 export function gainToDb(value: number): number {

@@ -3,7 +3,7 @@ name: Build Vale Studio Desktop (Windows)
 on:
   workflow_dispatch:
   push:
-    branches: [main, codex/vst3-preview]
+    branches: [main, codex/vst3-preview, codex/asio-work]
     paths:
       - 'src-tauri/**'
       - 'native/vst3-host/**'
