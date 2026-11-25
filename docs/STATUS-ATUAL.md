@@ -11,13 +11,15 @@ O aplicativo é utilizável em cenários já testados, mas não está completo e
 | Mixer | Volume, pan, mute/solo/Solo Safe, master, auxiliares, sends pré/pós, medidores e picos | VCA, grupos de mix, múltiplos masters, inserts externos e I/O avançada |
 | Efeitos internos | EQ/filtro, compressor, reverb, delay, gate e limiter de pico por amostra | Processamento avançado; limiter não é uma garantia de true peak |
 | Automação | Volume/pan Off/Read/Write/Touch/Latch; curvas por pontos de sends Reverb/Delay na 0.1.16 | Gravação gestual dos sends, auxiliares personalizados e plugins; lanes simultâneas |
-| MIDI | Entrada externa, pista MIDI/instrumento, gravação e edição de notas/velocidade/canal, quantização, transposição, sustain, importar/exportar MIDI básico | Demais CC, pitch bend, aftertouch, program change, loop, step input, mapas de tempo/compasso, partitura e sincronismo |
+| MIDI | Entrada externa, pista MIDI/instrumento, gravação e edição de notas/velocidade/canal, filtro de canal por pista, quantização, transposição, sustain, importar/exportar MIDI básico | Demais CC, pitch bend, aftertouch, program change, loop, step input, mapas de tempo/compasso, partitura e sincronismo |
 | VST3 | Scan isolado, catálogo/cache/favoritos, inserts, efeitos/instrumentos, processamento em tempo real e offline, editor nativo quando disponível, bypass, estado local | Compatibilidade ampla comprovada, PDC completa, sidechain/múltiplas saídas, automação de parâmetros, estado/presets portáveis e quarentena persistente |
 | Exportação | WAV/MP3, stems ZIP, intervalo, clipe WAV, renderizar pista em áudio | Freeze reversível no mesmo canal, dither/opções avançadas, AAF/OMF/MXF |
 | Pós-produção | Régua visual de timecode fixo | Vídeo e sincronismo profissional, superfícies de controle, colaboração/chat, elasticidade e correção de afinação |
 
-VST2 não foi implementado. A especificação técnica posterior registrada no projeto adota exclusivamente VST3.
+VST2 está fora do escopo. O Vale Studio usa exclusivamente VST3 para plugins de terceiros.
 
 Testes de referência: houve captura de duas pistas por 610,49 s na 0.1.12 com cabo virtual. Isso não valida toda interface/driver físico nem todas as versões seguintes. EZdrummer 3 produziu áudio em teste do host; Kontakt e Reason não têm compatibilidade completa comprovada. Não há fundamento para declarar 90% de confiabilidade global.
 
 Prioridade recomendada: consolidar motor/latência e I/O; ampliar compatibilidade e estado VST3; completar gravação/MIDI; depois edição e pós-produção avançadas.
+
+Os itens pendentes foram agrupados em dois blocos de entrega em [LOTES-DE-ENTREGA.md](LOTES-DE-ENTREGA.md). O Lote 1 foi iniciado com o filtro de canal MIDI por pista da versão 0.1.17.

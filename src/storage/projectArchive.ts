@@ -107,6 +107,7 @@ function assertArchive(value: unknown): asserts value is ProjectArchive {
     if (item?.timelineHeight !== undefined && !['compact', 'normal', 'large'].includes(String(item.timelineHeight))) return true
     if (item?.recordChannels !== undefined && item.recordChannels !== 1 && item.recordChannels !== 2) return true
     if (item?.inputDeviceId !== undefined && typeof item.inputDeviceId !== 'string') return true
+    if (item?.midiInputChannel !== undefined && (typeof item.midiInputChannel !== 'number' || !Number.isInteger(item.midiInputChannel) || item.midiInputChannel < 0 || item.midiInputChannel > 15)) return true
     if (item?.outputBusId !== undefined && (typeof item.outputBusId !== 'string' || !auxIds.has(item.outputBusId))) return true
     if (item?.auxSends !== undefined) {
       if (!Array.isArray(item.auxSends) || item.auxSends.length > MAX_AUX_SENDS) return true

@@ -111,6 +111,8 @@ export type Track = {
   monitorMode: MonitorMode
   recordChannels?: 1 | 2
   inputDeviceId?: string
+  /** Undefined accepts every MIDI channel; 0–15 pins the track to one channel. */
+  midiInputChannel?: number
   automation?: TrackAutomation
   effects: EffectSettings
   vst3Inserts: Vst3Insert[]
@@ -215,6 +217,11 @@ export function dbToGain(value: number): number {
 
 export function trackIsMuted(track: Track, soloActive: boolean): boolean {
   return Boolean(track.inactive || track.mute || (soloActive && !track.solo && !track.soloSafe))
+}
+
+export function acceptsMidiChannel(track: Track, channel: number): boolean {
+  return Number.isInteger(channel) && channel >= 0 && channel <= 15 &&
+    (track.midiInputChannel === undefined || track.midiInputChannel === channel)
 }
 
 export function gainToDb(value: number): number {

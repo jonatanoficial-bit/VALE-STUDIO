@@ -20,7 +20,7 @@ import { clipsForConsolidation } from './domain/consolidate'
 import { DEFAULT_GATE, DEFAULT_LIMITER } from './audio/dynamics'
 import type { GateSettings, LimiterSettings } from './domain/model'
 import { loopSlices } from './audio/loopRecording'
-import { createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
+import { acceptsMidiChannel, createMidiTrack, createProject, createTrack, DEFAULT_VST_BUFFER_FRAMES, gainToDb } from './domain/model'
 import { exportProjectArchive, PROJECT_ARCHIVE_EXTENSION, PROJECT_ARCHIVE_MIME, restoreProjectArchive } from './storage/projectArchive'
 import { projectRepository, type TakeDraft } from './storage/projectRepository'
 import { chooseVst3Directory, isDesktopRuntime, probeVst3Plugin, scanDefaultVst3Directories, scanVst3Directory, type Vst3Plugin } from './platform/desktop'
@@ -971,7 +971,7 @@ export default function App() {
     const current = projectRef.current
     const trackId = selectedTrackIdRef.current
     const track = current?.tracks.find((item) => item.id === trackId)
-    if (!current || !track || track.inactive || track.kind !== 'midi') return
+    if (!current || !track || track.inactive || track.kind !== 'midi' || !acceptsMidiChannel(track, message.channel)) return
     const key = message.channel * 128 + message.note
     if (message.type === 'noteon') {
       engineRef.current.playMidiNote(message.note, message.velocity, track.id, message.channel)
@@ -1808,6 +1808,15 @@ export default function App() {
               <option value={1}>Mono</option><option value={2}>Estéreo</option>
             </select></label>}
             {selectedTrack?.kind === 'midi' && <>
+              <label>Canal MIDI <select aria-label="Canal MIDI da pista" value={selectedTrack.midiInputChannel ?? ''} disabled={isRecording} onChange={(event) => {
+                midiRef.current.panic()
+                engineRef.current.stopMidiNotes()
+                activeMidiNotesRef.current.clear()
+                const value = event.target.value
+                updateTrack(selectedTrack.id, (track) => ({ ...track, midiInputChannel: value === '' ? undefined : Number(value) }))
+              }}>
+                <option value="">Todos os canais</option>{Array.from({ length: 16 }, (_, channel) => <option key={channel} value={channel}>Canal {channel + 1}</option>)}
+              </select></label>
               <button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'MIDI conectado' : 'Conectar MIDI'}</button>
               <button type="button" className="button secondary" onClick={() => {
                 midiRef.current.panic()
@@ -2275,7 +2284,11 @@ export default function App() {
       </>}
     </dialog>
 
-    {view === 'project' && <section className="midi-panel"><div><span className="eyebrow">MIDI EXTERNO</span><h3>{selectedTrack?.kind === 'midi' ? `Entrada para ${selectedTrack.name}` : 'Selecione uma pista MIDI'}</h3><p>Conecte um teclado/controlador. As notas podem ser pré-ouvidas pelo sintetizador local e gravadas na pista MIDI armada. No Desktop, coloque um instrumento VST3 no primeiro insert da pista MIDI e inicie a reprodução.</p></div><div className="midi-controls"><select aria-label="Entrada MIDI" value={midiInputId ?? ''} onChange={(event) => setMidiInputId(event.target.value || undefined)}><option value="">{midiDevices.length ? 'Escolha a entrada MIDI' : 'Nenhuma entrada detectada ainda'}</option>{midiDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select><button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'Atualizar MIDI' : 'Conectar MIDI'}</button><small>{midiReady ? 'Entrada pronta. Para gravar, selecione e arme uma pista MIDI, depois use REC.' : 'O dispositivo só é acessado depois do seu toque em Conectar MIDI.'}</small></div></section>}
+    {view === 'project' && <section className="midi-panel"><div><span className="eyebrow">MIDI EXTERNO</span><h3>{selectedTrack?.kind === 'midi' ? `Entrada para ${selectedTrack.name}` : 'Selecione uma pista MIDI'}</h3><p>Conecte um teclado/controlador. As notas podem ser pré-ouvidas pelo sintetizador local e gravadas na pista MIDI armada. No Desktop, coloque um instrumento VST3 no primeiro insert da pista MIDI e inicie a reprodução.</p></div><div className="midi-controls"><select aria-label="Entrada MIDI" value={midiInputId ?? ''} onChange={(event) => setMidiInputId(event.target.value || undefined)}><option value="">{midiDevices.length ? 'Escolha a entrada MIDI' : 'Nenhuma entrada detectada ainda'}</option>{midiDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select>{selectedTrack?.kind === 'midi' && <select aria-label="Canal MIDI do projeto" value={selectedTrack.midiInputChannel ?? ''} disabled={isRecording} onChange={(event) => {
+      midiRef.current.panic(); engineRef.current.stopMidiNotes(); activeMidiNotesRef.current.clear()
+      const value = event.target.value
+      updateTrack(selectedTrack.id, (track) => ({ ...track, midiInputChannel: value === '' ? undefined : Number(value) }))
+    }}><option value="">Todos os canais</option>{Array.from({ length: 16 }, (_, channel) => <option key={channel} value={channel}>Canal {channel + 1}</option>)}</select>}<button className="button secondary" onClick={() => void enableMidiInput()}>{midiReady ? 'Atualizar MIDI' : 'Conectar MIDI'}</button><small>{midiReady ? `Entrada pronta${selectedTrack?.kind === 'midi' ? ` · ${selectedTrack.midiInputChannel === undefined ? 'todos os canais' : `canal ${selectedTrack.midiInputChannel + 1}`}` : ''}. Para gravar, selecione e arme uma pista MIDI, depois use REC.` : 'O dispositivo só é acessado depois do seu toque em Conectar MIDI.'}</small></div></section>}
 
     {view === 'project' && <section className={`desktop-vst3-panel ${desktopRuntime ? 'desktop-ready' : ''}`}><div><span className="eyebrow">VST3 DESKTOP</span><h3>{desktopRuntime ? 'Catálogo de plug-ins VST3' : 'Plug-ins VST3 exigem o app Desktop'}</h3><p>{desktopRuntime ? 'Ao abrir, o app procura VST3 nas pastas padrão do Windows. Escolha uma pasta sua para acrescentar outros plug-ins; a inspeção acontece em processo nativo separado, com prazo de segurança.' : 'No navegador, continue usando os efeitos nativos. O suporte VST3 aparece apenas no instalador Vale Studio para Windows.'}</p></div><div className="vst3-actions"><button className="button secondary" onClick={() => void chooseAndScanVst3Directory()} disabled={isScanningVst3}>{isScanningVst3 ? 'Verificando…' : desktopRuntime ? 'Escolher pasta VST3' : 'Como usar no Desktop'}</button>{desktopRuntime && vst3Directory && <button className="link-button" onClick={() => void scanVst3Plugins(vst3Directory)} disabled={isScanningVst3}>Verificar novamente</button>}</div>{vst3Directory && <small className="vst3-directory">Pasta escolhida: {vst3Directory}</small>}{vst3Plugins.length > 0 && <div className="vst3-plugin-list">{vst3Plugins.map((plugin) => <article key={`${plugin.bundlePath}:${plugin.classId}`}><span>{plugin.kind === 'instrument' ? 'VST3 MIDI' : 'VST3 FX'}</span><div><strong>{plugin.name}</strong><small>{plugin.vendor || 'Fabricante não informado'} · {plugin.version || 'versão não informada'}</small></div><code>{plugin.classId}</code></article>)}</div>}{vst3ScanErrors.length > 0 && <details className="vst3-errors"><summary>{vst3ScanErrors.length} item{vst3ScanErrors.length === 1 ? '' : 's'} não pôde{vst3ScanErrors.length === 1 ? '' : 'ram'} ser inspecionado{vst3ScanErrors.length === 1 ? '' : 's'}</summary><ul>{vst3ScanErrors.slice(0, 8).map((error) => <li key={error}>{error}</li>)}</ul></details>}</section>}
 
