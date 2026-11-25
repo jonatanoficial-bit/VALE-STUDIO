@@ -37,6 +37,8 @@ As classificações abaixo descrevem comportamento observável. **Parcial** indi
 
 - Versão 0.1.17: uma pista MIDI pode aceitar todos os canais do controlador ou somente um canal de 1 a 16. Mudar o canal encerra notas ativas antes de aplicar a nova rota. O filtro vale para prévia do instrumento e gravação de notas; não transforma CC, pitch bend, aftertouch ou program change em eventos de projeto, que permanecem pendentes no Lote 1.
 
+- Verificação do MSI 0.1.17 em 25/11/2026: lint, 44 testes e build do CI concluídos. Em perfil WebView2 isolado, um controlador MIDI simulado enviou notas nos canais 2 e 3; uma pista configurada no canal 3 ignorou a nota do canal 2 e gravou somente a nota 64 do canal 3, preservando duração, velocity e canal ao reabrir o projeto. SHA-256 do MSI: `C020FEA8BBD74B95D8426FADAE5D19A02E4776E90E3003F48BC66AB42C3B499D`.
+
 - A entrada MIDI interpreta sustain CC64 por canal. O note-off é adiado até a liberação do pedal, e a gravação preserva essa duração. CC120 e CC123 encerram as notas do canal. Trocar de pista, desconectar o controlador ou usar **Encerrar notas MIDI** libera as notas ativas. Pitch bend continua pendente no host VST3.
 
 - Em **Pistas → Analisar clipe**, o Vale Studio mede picos em janelas de 5 ms sobre o PCM da mídia. É possível navegar para ataques e criar marcadores. A separação de silêncio usa limiar, duração mínima e margem configuráveis. Os trechos reaproveitam a mesma mídia, conservam o alinhamento e recebem fades curtos nas novas bordas.
